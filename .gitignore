@@ -1,3 +1,4 @@
-bibtui
+/bibtui
+annotations.json
 __pycache__/
 *.pyc

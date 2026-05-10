@@ -1,0 +1,67 @@
+{
+  "groups": {
+    "notes": {
+      "name": "notes",
+      "color": "#88CC88",
+      "annotations": [
+        {
+          "ref": {"book": "john", "chapter": 1, "verse": 1},
+          "text": "The Word (Greek: Logos) — the same term used in Greek philosophy for the ordering principle of the cosmos.",
+          "intensity": 3
+        },
+        {
+          "ref": {"book": "john", "chapter": 1, "verse": 14},
+          "text": "'Made his dwelling' translates ἐσκήνωσεν, literally 'tabernacled' — a deliberate echo of the OT tabernacle.",
+          "intensity": 2
+        },
+        {
+          "ref": {"book": "john", "chapter": 1, "verse": 29},
+          "text": "Lamb of God — connects to Passover and the Suffering Servant songs (Isaiah 53).",
+          "intensity": 2
+        }
+      ]
+    },
+    "crossrefs": {
+      "name": "crossrefs",
+      "color": "#CC8888",
+      "annotations": [
+        {
+          "ref": {"book": "john", "chapter": 1, "verse": 1},
+          "text": "cf. Genesis 1:1; Proverbs 8:22-31; Colossians 1:15-17",
+          "intensity": 1
+        },
+        {
+          "ref": {"book": "john", "chapter": 1, "verse": 14},
+          "text": "cf. Exodus 25:8; Leviticus 26:11-12; Revelation 21:3",
+          "intensity": 1
+        },
+        {
+          "ref": {"book": "john", "chapter": 1, "verse": 23},
+          "text": "cf. Isaiah 40:3",
+          "intensity": 1
+        }
+      ]
+    },
+    "greek": {
+      "name": "greek",
+      "color": "#8888CC",
+      "annotations": [
+        {
+          "ref": {"book": "john", "chapter": 1, "verse": 1},
+          "text": "Ἐν ἀρχῇ ἦν ὁ λόγος",
+          "intensity": 2
+        },
+        {
+          "ref": {"book": "john", "chapter": 1, "verse": 14},
+          "text": "ὁ λόγος σὰρξ ἐγένετο καὶ ἐσκήνωσεν ἐν ἡμῖν",
+          "intensity": 2
+        }
+      ]
+    }
+  },
+  "active_groups": {
+    "notes": true,
+    "crossrefs": true,
+    "greek": true
+  }
+}
