@@ -103,11 +103,12 @@ func renderAnnotations(store *AnnotationStore, ref AnnotationRef, aw int) []stri
 // buildContent renders a chapter for all active translations into a slice of
 // display lines.  When active annotation groups exist an extra right-hand
 // column is reserved so that annotations can be shown aligned with the verses
-// they annotate.
-func buildContent(c ref, translations []string, store *AnnotationStore, totalW int) []string {
+// they annotate.  The returned map records the starting line offset for each
+// verse number (used for verse-level scrolling).
+func buildContent(c ref, translations []string, store *AnnotationStore, totalW int) ([]string, map[int]int) {
 	n := len(translations)
 	if n == 0 {
-		return nil
+		return nil, nil
 	}
 
 	// Decide whether we need an annotation column.
@@ -165,6 +166,7 @@ func buildContent(c ref, translations []string, store *AnnotationStore, totalW i
 		strings.Join(sepParts, divSt.Render("┼")),
 		"",
 	}
+	verseMap := make(map[int]int)
 
 	// Parse each translation's verses.
 	allVerses := make([][]verse, n)
@@ -178,6 +180,7 @@ func buildContent(c ref, translations []string, store *AnnotationStore, totalW i
 
 	// For each verse slot, render all panes plus optional annotations.
 	for vi := 0; vi < maxV; vi++ {
+		lineOffset := len(result)
 		paneLines := make([][]string, n)
 		maxH := 0
 		for pi := range translations {
@@ -190,14 +193,17 @@ func buildContent(c ref, translations []string, store *AnnotationStore, totalW i
 		}
 
 		var annLines []string
-		if hasAnnCol {
-			vnum := 0
-			for pi := 0; pi < n; pi++ {
-				if vi < len(allVerses[pi]) {
-					vnum = allVerses[pi][vi].num
-					break
-				}
+		vnum := 0
+		for pi := 0; pi < n; pi++ {
+			if vi < len(allVerses[pi]) {
+				vnum = allVerses[pi][vi].num
+				break
 			}
+		}
+		if vnum > 0 {
+			verseMap[vnum] = lineOffset
+		}
+		if hasAnnCol {
 			if vnum > 0 {
 				annRef := AnnotationRef{Book: c.book.slug, Chapter: c.num, Verse: vnum}
 				annLines = renderAnnotations(store, annRef, aw)
@@ -228,5 +234,5 @@ func buildContent(c ref, translations []string, store *AnnotationStore, totalW i
 		result = append(result, blankRow)
 	}
 
-	return result
+	return result, verseMap
 }

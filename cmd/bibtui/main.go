@@ -33,12 +33,17 @@ type model struct {
 	translations []string // active translations
 	allTrans     []string // all detected translations
 	lines        []string // pre-rendered combined display lines
+	verseMap     map[int]int // verse number → line offset within m.lines
 	scroll       int
 	width        int
 	height       int
 	ready        bool
 	pickerOpen   bool
 	pickerIdx    int
+	gotoOpen     bool
+	gotoInput    string
+	gotoCands    []int // indices into books[] matching current input
+	gotoCursor   int
 	store        *AnnotationStore
 }
 
@@ -82,13 +87,14 @@ func (m model) isActive(t string) bool {
 	return false
 }
 
-// withContent rebuilds m.lines from the current state and returns the updated model.
+// withContent rebuilds m.lines and m.verseMap from the current state.
 func (m model) withContent() model {
 	if !m.ready || len(m.translations) == 0 || len(m.index) == 0 {
 		m.lines = nil
+		m.verseMap = nil
 		return m
 	}
-	m.lines = buildContent(m.index[m.pos], m.translations, m.store, m.width)
+	m.lines, m.verseMap = buildContent(m.index[m.pos], m.translations, m.store, m.width)
 	return m
 }
 
@@ -135,6 +141,51 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		if m.gotoOpen {
+			switch msg.Type {
+			case tea.KeyEsc:
+				m.gotoOpen = false
+				m.gotoInput = ""
+				m.gotoCands = nil
+			case tea.KeyEnter:
+				_, _, verse := parseGotoQuery(m.gotoInput)
+				newPos := m.resolveGoto()
+				m.gotoOpen = false
+				m.gotoInput = ""
+				m.gotoCands = nil
+				if newPos >= 0 {
+					m.pos = newPos
+					m = m.withContent()
+					m.scroll = 0
+					if verse > 0 && m.verseMap != nil {
+						if off, ok := m.verseMap[verse]; ok {
+							m.scroll = clamp(off, 0, m.maxScroll())
+						}
+					}
+				}
+			case tea.KeyTab:
+				m = m.gotoComplete()
+			case tea.KeyUp:
+				if m.gotoCursor > 0 {
+					m.gotoCursor--
+				}
+			case tea.KeyDown:
+				if m.gotoCursor < len(m.gotoCands)-1 {
+					m.gotoCursor++
+				}
+			case tea.KeyBackspace:
+				if len(m.gotoInput) > 0 {
+					runes := []rune(m.gotoInput)
+					m.gotoInput = string(runes[:len(runes)-1])
+					m = m.updateGotoCands()
+				}
+			case tea.KeyRunes:
+				m.gotoInput += string(msg.Runes)
+				m = m.updateGotoCands()
+			}
+			return m, nil
+		}
+
 		if m.pickerOpen {
 			switch msg.String() {
 			case "q", "esc":
@@ -159,6 +210,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
+		case ":":
+			m.gotoOpen = true
+			m.gotoInput = ""
+			m.gotoCands = nil
+			m.gotoCursor = 0
 		case "j", "down":
 			m.scroll = clamp(m.scroll+1, 0, m.maxScroll())
 		case "k", "up":
@@ -225,6 +281,40 @@ func (m model) statusBar() string {
 	return statusSt.Render(left + strings.Repeat(" ", gap) + right)
 }
 
+func (m model) updateGotoCands() model {
+	bookQuery, _, _ := parseGotoQuery(m.gotoInput)
+	m.gotoCands = bookCandidates(bookQuery)
+	m.gotoCursor = 0
+	return m
+}
+
+func (m model) resolveGoto() int {
+	bookQuery, chapter, _ := parseGotoQuery(m.gotoInput)
+	cands := bookCandidates(bookQuery)
+	if len(cands) == 0 {
+		return -1
+	}
+	bookIdx := cands[0]
+	if m.gotoCursor < len(cands) {
+		bookIdx = cands[m.gotoCursor]
+	}
+	return findIndexPos(m.index, bookIdx, chapter)
+}
+
+func (m model) gotoComplete() model {
+	if len(m.gotoCands) == 0 {
+		return m
+	}
+	idx := m.gotoCursor
+	if idx >= len(m.gotoCands) {
+		idx = 0
+	}
+	bookName := books[m.gotoCands[idx]].name
+	m.gotoInput = gotoCompleteInput(m.gotoInput, bookName)
+	m = m.updateGotoCands()
+	return m
+}
+
 func (m model) helpBar() string {
 	if m.pickerOpen {
 		return helpSt.Render("  space toggle  ·  j/k move  ·  q/esc close")
@@ -234,12 +324,80 @@ func (m model) helpBar() string {
 	if len(groups) > 0 {
 		groupHelp = " ·  1-" + strconv.Itoa(clamp(len(groups), 1, 9)) + " toggle groups"
 	}
-	return helpSt.Render("  j/k scroll  ·  [/] chapter  ·  o open/close" + groupHelp + "  ·  q quit")
+	return helpSt.Render("  j/k scroll  ·  [/] chapter  ·  : goto  ·  o translations" + groupHelp + "  ·  q quit")
+}
+
+// viewWithGoto renders the normal content but shrinks it to make room for
+// a candidate list and a command bar at the bottom, keeping the text visible.
+func (m model) viewWithGoto() string {
+	bookQuery, chapter, verse := parseGotoQuery(m.gotoInput)
+
+	// How many candidate rows to show (plus one separator line).
+	maxCands := 6
+	n := len(m.gotoCands)
+	if n > maxCands {
+		n = maxCands
+	}
+	popupLines := 0
+	if bookQuery != "" && n > 0 {
+		popupLines = n + 1 // separator + candidates
+	}
+
+	// Content — shrink to leave room for popup.
+	contentH := m.vpH() - popupLines
+	if contentH < 0 {
+		contentH = 0
+	}
+	end := clamp(m.scroll+contentH, 0, len(m.lines))
+	var content string
+	if contentH > 0 {
+		rows := m.lines[m.scroll:end]
+		content = strings.Join(rows, "\n")
+		if len(rows) < contentH {
+			content += strings.Repeat("\n", contentH-len(rows))
+		}
+		content += "\n"
+	}
+
+	// Candidate popup rows.
+	var popup string
+	if popupLines > 0 {
+		popup += divSt.Render(strings.Repeat("─", m.width)) + "\n"
+		for i := 0; i < n; i++ {
+			prefix := "  "
+			if i == m.gotoCursor {
+				prefix = "▶ "
+			}
+			b := books[m.gotoCands[i]]
+			desc := b.name
+			if chapter > 0 && verse > 0 {
+				desc = fmt.Sprintf("%s %d:%d", b.name, chapter, verse)
+			} else if chapter > 0 {
+				desc = fmt.Sprintf("%s %d", b.name, chapter)
+			}
+			line := prefix + desc
+			if i == m.gotoCursor {
+				line = pickerCursorSt.Render(line)
+			}
+			popup += padToWidth(line, m.width) + "\n"
+		}
+	}
+
+	// Command bar (replaces help bar).
+	cmdBar := helpSt.Render(
+		padToWidth("  "+pickerCursorSt.Render(":")+" "+m.gotoInput+"█"+"  tab complete  ·  ↑/↓ navigate  ·  esc cancel", m.width),
+	)
+
+	return m.statusBar() + "\n" + content + popup + cmdBar
 }
 
 func (m model) View() string {
 	if !m.ready {
 		return "\n  Loading..."
+	}
+
+	if m.gotoOpen {
+		return m.viewWithGoto()
 	}
 
 	if m.pickerOpen {
