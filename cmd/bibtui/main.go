@@ -190,29 +190,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
-		if m.mode == modeHome {
-			switch msg.String() {
-			case "q", "ctrl+c":
-				return m, tea.Quit
-			case "n":
-				m.pos = 0
-				m.scroll = 0
-				m = m.withMode(modeReader)
-				m.gotoOpen = true
-				m.gotoInput = ""
-				m.gotoCands = nil
-				m.gotoCursor = 0
-			case "r":
-				if m.session != nil {
-					m = m.applySession(m.session)
-					m = m.withMode(modeReader)
-					m.scroll = m.session.Scroll
-					m = m.withScrollClamped()
-				}
-			}
-			return m, nil
-		}
-
 		if m.gotoOpen {
 			switch msg.Type {
 			case tea.KeyEsc:
@@ -233,6 +210,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						if off, ok := m.verseMap[verse]; ok {
 							m.scroll = clamp(off, 0, m.maxScroll())
 						}
+					}
+					if m.mode == modeHome {
+						m.mode = modeReader
 					}
 					saveSession(m)
 				}
@@ -255,6 +235,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case tea.KeyRunes:
 				m.gotoInput += string(msg.Runes)
 				m = m.updateGotoCands()
+			}
+			return m, nil
+		}
+
+		if m.mode == modeHome {
+			switch msg.String() {
+			case "q", "ctrl+c":
+				return m, tea.Quit
+			case "n":
+				m.pos = 0
+				m.scroll = 0
+				m = m.withMode(modeReader)
+			case "g":
+				m.gotoOpen = true
+				m.gotoInput = ""
+				m.gotoCands = nil
+				m.gotoCursor = 0
+			case "r":
+				if m.session != nil {
+					m = m.applySession(m.session)
+					m = m.withMode(modeReader)
+					m.scroll = m.session.Scroll
+					m = m.withScrollClamped()
+				}
 			}
 			return m, nil
 		}
