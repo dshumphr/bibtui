@@ -71,6 +71,7 @@ type model struct {
 	noteCands         []Annotation
 	noteCursor        int // row inside the inner panel (0..len(noteCands) for + new note)
 	noteInput         string
+	noteInputCursor   int  // rune index within noteInput
 	noteEditIdx       int  // -1 = creating new, >=0 = editing existing index
 	noteDeleteConfirm bool // y/n prompt for deletion
 }
@@ -591,9 +592,9 @@ func (m model) viewWithNotes() string {
 	case m.noteDeleteConfirm:
 		inputLine = "  " + pickerCursorSt.Render("delete this note? (y/n)")
 	case m.noteEditIdx >= 0:
-		inputLine = "  edit > " + m.noteInput + "█"
+		inputLine = "  edit > " + renderInputWithCursor(m.noteInput, m.noteInputCursor)
 	case m.noteInput != "" || m.noteCursor == len(m.noteCands):
-		inputLine = "  new  > " + m.noteInput + "█"
+		inputLine = "  new  > " + renderInputWithCursor(m.noteInput, m.noteInputCursor)
 	default:
 		inputLine = "  enter to edit · esc to close"
 		inputLine = helpSt.Render(inputLine)
@@ -630,6 +631,22 @@ func (m model) viewWithNotes() string {
 	}
 
 	return m.statusBar() + "\n" + content + strings.Join(overlay, "\n")
+}
+
+// renderInputWithCursor renders a text input with a block cursor at the given
+// rune position.
+func renderInputWithCursor(s string, pos int) string {
+	runes := []rune(s)
+	if pos < 0 {
+		pos = 0
+	}
+	if pos > len(runes) {
+		pos = len(runes)
+	}
+	if pos == len(runes) {
+		return string(runes) + inputCursorSt.Render(" ")
+	}
+	return string(runes[:pos]) + inputCursorSt.Render(string(runes[pos])) + string(runes[pos+1:])
 }
 
 // sortedVerses returns the verse numbers of the current chapter in ascending order.
@@ -673,6 +690,7 @@ func (m model) openInnerNote() model {
 	}
 	m.noteCursor = 0
 	m.noteInput = ""
+	m.noteInputCursor = 0
 	m.noteEditIdx = -1
 	m.noteDeleteConfirm = false
 	return m
@@ -682,6 +700,7 @@ func (m model) openInnerNote() model {
 func (m model) closeInnerNote() model {
 	m.noteUI = noteUIOuter
 	m.noteInput = ""
+	m.noteInputCursor = 0
 	m.noteEditIdx = -1
 	m.noteDeleteConfirm = false
 	m.noteCands = nil
@@ -769,6 +788,7 @@ func (m model) updateInnerNote(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if editing && (m.noteInput != "" || m.noteEditIdx >= 0) {
 			// cancel the in-progress edit, stay in inner panel
 			m.noteInput = ""
+			m.noteInputCursor = 0
 			m.noteEditIdx = -1
 			return m, nil
 		}
@@ -779,6 +799,7 @@ func (m model) updateInnerNote(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// "enter" on a note row → load it for editing
 			if m.noteCursor < len(m.noteCands) {
 				m.noteInput = m.noteCands[m.noteCursor].Text
+				m.noteInputCursor = len([]rune(m.noteInput))
 				m.noteEditIdx = m.noteCursor
 			}
 			// "enter" on + new note row → just start typing (input stays empty)
@@ -796,9 +817,43 @@ func (m model) updateInnerNote(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m = m.closeInnerNote()
 		return m, nil
 	case tea.KeyBackspace:
-		if len(m.noteInput) > 0 {
+		if editing && m.noteInputCursor > 0 {
 			runes := []rune(m.noteInput)
-			m.noteInput = string(runes[:len(runes)-1])
+			runes = append(runes[:m.noteInputCursor-1], runes[m.noteInputCursor:]...)
+			m.noteInput = string(runes)
+			m.noteInputCursor--
+		}
+		return m, nil
+	case tea.KeyDelete:
+		if editing {
+			runes := []rune(m.noteInput)
+			if m.noteInputCursor < len(runes) {
+				runes = append(runes[:m.noteInputCursor], runes[m.noteInputCursor+1:]...)
+				m.noteInput = string(runes)
+			}
+		}
+		return m, nil
+	case tea.KeyLeft:
+		if editing && m.noteInputCursor > 0 {
+			m.noteInputCursor--
+		}
+		return m, nil
+	case tea.KeyRight:
+		if editing {
+			n := len([]rune(m.noteInput))
+			if m.noteInputCursor < n {
+				m.noteInputCursor++
+			}
+		}
+		return m, nil
+	case tea.KeyHome, tea.KeyCtrlA:
+		if editing {
+			m.noteInputCursor = 0
+		}
+		return m, nil
+	case tea.KeyEnd, tea.KeyCtrlE:
+		if editing {
+			m.noteInputCursor = len([]rune(m.noteInput))
 		}
 		return m, nil
 	case tea.KeyUp:
@@ -837,7 +892,14 @@ func (m model) updateInnerNote(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Only consume keystrokes as text when the user is plausibly composing:
 		// already editing, or sitting on the "+ new note" row.
 		if editing || m.noteCursor == len(m.noteCands) {
-			m.noteInput += string(msg.Runes)
+			runes := []rune(m.noteInput)
+			ins := msg.Runes
+			out := make([]rune, 0, len(runes)+len(ins))
+			out = append(out, runes[:m.noteInputCursor]...)
+			out = append(out, ins...)
+			out = append(out, runes[m.noteInputCursor:]...)
+			m.noteInput = string(out)
+			m.noteInputCursor += len(ins)
 		}
 	}
 	return m, nil

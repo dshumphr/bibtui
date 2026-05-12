@@ -45,6 +45,8 @@ var (
 			Faint(true).
 			Italic(true).
 			Foreground(lipgloss.AdaptiveColor{Light: "#888888", Dark: "#666666"})
+
+	inputCursorSt = lipgloss.NewStyle().Reverse(true)
 )
 
 // ── content rendering ─────────────────────────────────────────────────────
