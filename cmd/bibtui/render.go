@@ -56,6 +56,23 @@ const (
 	numCols    = 4 // "NNN " — fits up to 3-digit verse numbers
 )
 
+// bookBanner returns the lines for the "THE BOOK OF X" header shown above
+// chapter 1.
+func bookBanner(bookName string, width int) []string {
+	if width <= 0 {
+		width = 1
+	}
+	title := strings.ToUpper("The Book of " + bookName)
+	rule := divSt.Render(strings.Repeat("━", width))
+	return []string{
+		"",
+		rule,
+		padToWidth(labelSt.Render(centerPad(title, width)), width),
+		rule,
+		"",
+	}
+}
+
 // renderVerseLines renders a single verse into display lines for a pane of
 // width paneW, with an inline verse number and word-wrapped text.
 func renderVerseLines(v verse, paneW int) []string {
@@ -183,6 +200,13 @@ func buildContent(c ref, translations []string, store *AnnotationStore, totalW i
 		strings.Join(sepParts, divSt.Render("┼")),
 		"",
 	}
+
+	// Book-title banner at the start of chapter 1.
+	if c.num == 1 {
+		banner := bookBanner(c.book.name, totalW)
+		result = append(banner, result...)
+	}
+
 	verseMap := make(map[int]int)
 
 	// Parse each translation's verses.
