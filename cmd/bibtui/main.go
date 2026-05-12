@@ -25,9 +25,20 @@ func detectTranslations() []string {
 	return out
 }
 
+// ── app mode ─────────────────────────────────────────────────────────────
+
+type appMode int
+
+const (
+	modeHome   appMode = iota
+	modeReader
+)
+
 // ── model ─────────────────────────────────────────────────────────────────
 
 type model struct {
+	mode    appMode
+	session *Session // last loaded session, shown on home screen
 	index        []ref
 	pos          int
 	translations []string // active translations
@@ -45,6 +56,42 @@ type model struct {
 	gotoCands    []int // indices into books[] matching current input
 	gotoCursor   int
 	store        *AnnotationStore
+}
+
+// withMode switches the app mode and triggers a content rebuild when entering
+// the reader so that lines are populated before the first render.
+func (m model) withMode(mode appMode) model {
+	m.mode = mode
+	if mode == modeReader {
+		m = m.withContent().withScrollClamped()
+	}
+	return m
+}
+
+// applySession restores position, scroll, and translations from a saved session.
+func (m model) applySession(s *Session) model {
+	for i, r := range m.index {
+		if r.book.slug == s.BookSlug && r.num == s.Chapter {
+			m.pos = i
+			break
+		}
+	}
+	if len(s.Translations) > 0 {
+		valid := make([]string, 0, len(s.Translations))
+		for _, t := range s.Translations {
+			for _, a := range m.allTrans {
+				if a == t {
+					valid = append(valid, t)
+					break
+				}
+			}
+		}
+		if len(valid) > 0 {
+			m.translations = valid
+		}
+	}
+	m.scroll = s.Scroll
+	return m
 }
 
 func initial(translations []string, store *AnnotationStore) model {
@@ -137,10 +184,31 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.ready = true
-		m = m.withContent().withScrollClamped()
+		if m.mode == modeReader {
+			m = m.withContent().withScrollClamped()
+		}
 		return m, nil
 
 	case tea.KeyMsg:
+		if m.mode == modeHome {
+			switch msg.String() {
+			case "q", "ctrl+c":
+				return m, tea.Quit
+			case "n":
+				m.pos = 0
+				m.scroll = 0
+				m = m.withMode(modeReader)
+			case "r":
+				if m.session != nil {
+					m = m.applySession(m.session)
+					m = m.withMode(modeReader)
+					m.scroll = m.session.Scroll
+					m = m.withScrollClamped()
+				}
+			}
+			return m, nil
+		}
+
 		if m.gotoOpen {
 			switch msg.Type {
 			case tea.KeyEsc:
@@ -162,6 +230,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							m.scroll = clamp(off, 0, m.maxScroll())
 						}
 					}
+					saveSession(m)
 				}
 			case tea.KeyTab:
 				m = m.gotoComplete()
@@ -209,6 +278,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		switch msg.String() {
 		case "q", "ctrl+c":
+			saveSession(m)
 			return m, tea.Quit
 		case ":":
 			m.gotoOpen = true
@@ -228,12 +298,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.pos++
 				m = m.withContent()
 				m.scroll = 0
+				saveSession(m)
 			}
 		case "[":
 			if m.pos > 0 {
 				m.pos--
 				m = m.withContent()
 				m.scroll = 0
+				saveSession(m)
 			}
 		case "o":
 			m.pickerOpen = true
@@ -396,6 +468,10 @@ func (m model) View() string {
 		return "\n  Loading..."
 	}
 
+	if m.mode == modeHome {
+		return homeView(m)
+	}
+
 	if m.gotoOpen {
 		return m.viewWithGoto()
 	}
@@ -482,11 +558,15 @@ func main() {
 		}
 	}
 
+	session := loadSession()
+
 	m := initial(startTrans, store)
 	if len(m.index) == 0 {
 		fmt.Fprintln(os.Stderr, "no chapters found")
 		os.Exit(1)
 	}
+	m.session = session
+	m.mode = modeHome
 
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
