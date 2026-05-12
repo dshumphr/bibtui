@@ -47,6 +47,7 @@ type AnnotationGroup struct {
 // ── store ─────────────────────────────────────────────────────────────────
 
 const defaultStorePath = "annotations.json"
+const exampleStorePath = "annotations.example.json"
 
 type AnnotationStore struct {
 	Groups       map[string]*AnnotationGroup `json:"groups"`
@@ -69,9 +70,14 @@ func NewAnnotationStore(path string) *AnnotationStore {
 func (s *AnnotationStore) Load() error {
 	data, err := os.ReadFile(s.path)
 	if os.IsNotExist(err) {
-		return nil
-	}
-	if err != nil {
+		data, err = os.ReadFile(exampleStorePath)
+		if os.IsNotExist(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+	} else if err != nil {
 		return err
 	}
 	return json.Unmarshal(data, s)
