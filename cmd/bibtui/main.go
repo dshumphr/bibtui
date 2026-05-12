@@ -198,6 +198,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.pos = 0
 				m.scroll = 0
 				m = m.withMode(modeReader)
+				m.gotoOpen = true
+				m.gotoInput = ""
+				m.gotoCands = nil
+				m.gotoCursor = 0
 			case "r":
 				if m.session != nil {
 					m = m.applySession(m.session)
