@@ -36,6 +36,15 @@ var (
 	pickerCursorSt = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(lipgloss.AdaptiveColor{Light: "#7C4E00", Dark: "#CBA252"})
+
+	noteCursorSt = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.AdaptiveColor{Light: "#7C4E00", Dark: "#CBA252"})
+
+	noteAddSt = lipgloss.NewStyle().
+			Faint(true).
+			Italic(true).
+			Foreground(lipgloss.AdaptiveColor{Light: "#888888", Dark: "#666666"})
 )
 
 // ── content rendering ─────────────────────────────────────────────────────
@@ -81,6 +90,9 @@ func renderAnnotations(store *AnnotationStore, ref AnnotationRef, aw int) []stri
 	for _, ga := range anns {
 		prefix := fmt.Sprintf("[%s] ", ga.GroupName)
 		style := lipgloss.NewStyle().Foreground(lipgloss.Color(ga.Group.Color))
+		if ga.GroupName == notesGroupName {
+			style = style.Italic(true)
+		}
 		if ga.Annotation.Intensity != nil {
 			switch *ga.Annotation.Intensity {
 			case 1:
@@ -105,7 +117,7 @@ func renderAnnotations(store *AnnotationStore, ref AnnotationRef, aw int) []stri
 // column is reserved so that annotations can be shown aligned with the verses
 // they annotate.  The returned map records the starting line offset for each
 // verse number (used for verse-level scrolling).
-func buildContent(c ref, translations []string, store *AnnotationStore, totalW int) ([]string, map[int]int) {
+func buildContent(c ref, translations []string, store *AnnotationStore, totalW int, cursorVerse int, noteMode bool) ([]string, map[int]int) {
 	n := len(translations)
 	if n == 0 {
 		return nil, nil
@@ -120,6 +132,9 @@ func buildContent(c ref, translations []string, store *AnnotationStore, totalW i
 				break
 			}
 		}
+	}
+	if noteMode {
+		hasAnnCol = true
 	}
 
 	// Allocate widths: translation panes + optional annotation pane.
@@ -206,7 +221,29 @@ func buildContent(c ref, translations []string, store *AnnotationStore, totalW i
 		if hasAnnCol {
 			if vnum > 0 {
 				annRef := AnnotationRef{Book: c.book.slug, Chapter: c.num, Verse: vnum}
-				annLines = renderAnnotations(store, annRef, aw)
+				innerW := aw
+				if noteMode {
+					innerW = aw - 2
+					if innerW < 1 {
+						innerW = 1
+					}
+				}
+				rawLines := renderAnnotations(store, annRef, innerW)
+				if noteMode && len(rawLines) == 0 {
+					rawLines = []string{padToWidth(noteAddSt.Render("+ add note"), innerW)}
+				}
+				if noteMode {
+					annLines = make([]string, len(rawLines))
+					for i, l := range rawLines {
+						gutter := "  "
+						if vnum == cursorVerse && i == 0 {
+							gutter = noteCursorSt.Render("▸ ")
+						}
+						annLines[i] = gutter + l
+					}
+				} else {
+					annLines = rawLines
+				}
 				if len(annLines) > maxH {
 					maxH = len(annLines)
 				}

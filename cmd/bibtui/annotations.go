@@ -179,6 +179,89 @@ func (s *AnnotationStore) sortGroup(g *AnnotationGroup) {
 	})
 }
 
+// ── notes ─────────────────────────────────────────────────────────────────
+
+const notesGroupName = "notes"
+const notesGroupColor = "#66AA66"
+
+// EnsureNotesGroup creates the "notes" group if it doesn't exist and ensures
+// it is active so notes are visible.
+func (s *AnnotationStore) EnsureNotesGroup() {
+	if _, ok := s.Groups[notesGroupName]; !ok {
+		s.Groups[notesGroupName] = &AnnotationGroup{
+			Name:  notesGroupName,
+			Color: notesGroupColor,
+		}
+	}
+	s.ActiveGroups[notesGroupName] = true
+}
+
+// NotesAtRef returns all annotations in the "notes" group matching ref.
+func (s *AnnotationStore) NotesAtRef(ref AnnotationRef) []Annotation {
+	g, ok := s.Groups[notesGroupName]
+	if !ok {
+		return nil
+	}
+	var out []Annotation
+	for _, a := range g.Annotations {
+		if a.Ref.Equal(ref) {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// AddNote creates a new note in the "notes" group.
+func (s *AnnotationStore) AddNote(ref AnnotationRef, text string) {
+	s.EnsureNotesGroup()
+	s.Add(notesGroupName, Annotation{
+		Ref:       ref,
+		Text:      text,
+		CreatedAt: time.Now(),
+	})
+}
+
+// UpdateNote updates the note at the given index (among notes matching ref).
+func (s *AnnotationStore) UpdateNote(ref AnnotationRef, idx int, text string) {
+	g, ok := s.Groups[notesGroupName]
+	if !ok {
+		return
+	}
+	var positions []int
+	for i, a := range g.Annotations {
+		if a.Ref.Equal(ref) {
+			positions = append(positions, i)
+		}
+	}
+	if idx < 0 || idx >= len(positions) {
+		return
+	}
+	g.Annotations[positions[idx]].Text = text
+}
+
+// DeleteNoteAt deletes the note at the given index (among notes matching ref).
+func (s *AnnotationStore) DeleteNoteAt(ref AnnotationRef, idx int) {
+	g, ok := s.Groups[notesGroupName]
+	if !ok {
+		return
+	}
+	var positions []int
+	for i, a := range g.Annotations {
+		if a.Ref.Equal(ref) {
+			positions = append(positions, i)
+		}
+	}
+	if idx < 0 || idx >= len(positions) {
+		return
+	}
+	pos := positions[idx]
+	g.Annotations = append(g.Annotations[:pos], g.Annotations[pos+1:]...)
+	if len(g.Annotations) == 0 {
+		delete(s.Groups, notesGroupName)
+		delete(s.ActiveGroups, notesGroupName)
+	}
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────
 
 type GroupAnnotation struct {

@@ -34,6 +34,14 @@ const (
 	modeReader
 )
 
+type noteUIMode int
+
+const (
+	noteUIOff   noteUIMode = iota
+	noteUIOuter            // browsing the annotation column verse-by-verse
+	noteUIInner            // managing notes for a single verse
+)
+
 // ── model ─────────────────────────────────────────────────────────────────
 
 type model struct {
@@ -56,6 +64,15 @@ type model struct {
 	gotoCands    []int // indices into books[] matching current input
 	gotoCursor   int
 	store        *AnnotationStore
+
+	noteUI            noteUIMode
+	noteCursorVerse   int // verse highlighted in the annotation column (outer)
+	noteRef           AnnotationRef
+	noteCands         []Annotation
+	noteCursor        int // row inside the inner panel (0..len(noteCands) for + new note)
+	noteInput         string
+	noteEditIdx       int  // -1 = creating new, >=0 = editing existing index
+	noteDeleteConfirm bool // y/n prompt for deletion
 }
 
 // withMode switches the app mode and triggers a content rebuild when entering
@@ -141,7 +158,11 @@ func (m model) withContent() model {
 		m.verseMap = nil
 		return m
 	}
-	m.lines, m.verseMap = buildContent(m.index[m.pos], m.translations, m.store, m.width)
+	cursor := 0
+	if m.noteUI != noteUIOff {
+		cursor = m.noteCursorVerse
+	}
+	m.lines, m.verseMap = buildContent(m.index[m.pos], m.translations, m.store, m.width, cursor, m.noteUI != noteUIOff)
 	return m
 }
 
@@ -172,6 +193,27 @@ func (m model) withToggled(t string) model {
 		sort.Strings(m.translations)
 	}
 	return m
+}
+
+// activeRef returns the verse whose top line is at or above the current scroll
+// position.  If no verse is visible yet, it returns an empty ref.
+func (m model) activeRef() AnnotationRef {
+	if m.verseMap == nil || len(m.index) == 0 {
+		return AnnotationRef{}
+	}
+	c := m.index[m.pos]
+	bestV := 0
+	bestOff := -1
+	for vnum, off := range m.verseMap {
+		if off <= m.scroll && (off > bestOff || (off == bestOff && vnum > bestV)) {
+			bestOff = off
+			bestV = vnum
+		}
+	}
+	if bestV == 0 {
+		return AnnotationRef{}
+	}
+	return AnnotationRef{Book: c.book.slug, Chapter: c.num, Verse: bestV}
 }
 
 // ── bubbletea lifecycle ───────────────────────────────────────────────────
@@ -237,6 +279,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m = m.updateGotoCands()
 			}
 			return m, nil
+		}
+
+		if m.noteUI == noteUIInner {
+			return m.updateInnerNote(msg)
+		}
+		if m.noteUI == noteUIOuter {
+			return m.updateOuterNote(msg)
 		}
 
 		if m.mode == modeHome {
@@ -317,6 +366,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "o":
 			m.pickerOpen = true
+		case "n":
+			if m.store != nil && len(m.verseMap) > 0 {
+				ref := m.activeRef()
+				v := ref.Verse
+				if v == 0 {
+					vs := m.sortedVerses()
+					if len(vs) > 0 {
+						v = vs[0]
+					}
+				}
+				if v > 0 {
+					m.noteUI = noteUIOuter
+					m.noteCursorVerse = v
+					m = m.withContent()
+					m = m.ensureCursorVisible()
+				}
+			}
 		case "1", "2", "3", "4", "5", "6", "7", "8", "9":
 			if m.store == nil {
 				break
@@ -353,6 +419,11 @@ func (m model) statusBar() string {
 	}
 
 	left := fmt.Sprintf("  %s %d  ·  %s%s  ", c.book.name, c.num, transLabel, annLabel)
+	if m.noteUI == noteUIOuter {
+		left += "·  NOTE  "
+	} else if m.noteUI == noteUIInner {
+		left += "·  NOTE › " + m.noteRef.String() + "  "
+	}
 	right := fmt.Sprintf("  %d%%  ", m.scrollPct())
 	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right)
 	if gap < 0 {
@@ -399,12 +470,15 @@ func (m model) helpBar() string {
 	if m.pickerOpen {
 		return helpSt.Render("  space toggle  ·  j/k move  ·  q/esc close")
 	}
+	if m.noteUI == noteUIOuter {
+		return helpSt.Render("  j/k verse  ·  enter open  ·  esc exit note mode")
+	}
 	groups := sortedGroupNames(m.store)
 	var groupHelp string
 	if len(groups) > 0 {
 		groupHelp = " ·  1-" + strconv.Itoa(clamp(len(groups), 1, 9)) + " toggle groups"
 	}
-	return helpSt.Render("  j/k scroll  ·  [/] chapter  ·  : goto  ·  o translations" + groupHelp + "  ·  q quit")
+	return helpSt.Render("  j/k scroll  ·  [/] chapter  ·  : goto  ·  o translations  ·  n notes" + groupHelp + "  ·  q quit")
 }
 
 // viewWithGoto renders the normal content but shrinks it to make room for
@@ -471,6 +545,304 @@ func (m model) viewWithGoto() string {
 	return m.statusBar() + "\n" + content + popup + cmdBar
 }
 
+// viewWithNotes renders the normal content but shrinks it to make room for
+// the per-verse note overlay at the bottom.
+func (m model) viewWithNotes() string {
+	var overlay []string
+
+	title := fmt.Sprintf("  Notes on %s  (other annotation groups are read-only)  ", m.noteRef.String())
+	overlay = append(overlay, helpSt.Render(padToWidth(title, m.width)))
+
+	// Existing notes
+	for i, note := range m.noteCands {
+		prefix := "    "
+		if i == m.noteCursor {
+			prefix = "  ▸ "
+		}
+		text := prefix + note.Text
+		wrapped := wordWrap(text, m.width-4)
+		for j, wl := range wrapped {
+			line := padToWidth(wl, m.width)
+			if i == m.noteCursor && j == 0 {
+				line = pickerCursorSt.Render(line)
+			}
+			overlay = append(overlay, line)
+		}
+	}
+
+	// Permanent "+ new note" row
+	newPrefix := "    "
+	if m.noteCursor == len(m.noteCands) {
+		newPrefix = "  ▸ "
+	}
+	newLine := padToWidth(newPrefix+"+ new note", m.width)
+	if m.noteCursor == len(m.noteCands) {
+		newLine = pickerCursorSt.Render(newLine)
+	} else {
+		newLine = noteAddSt.Render(newLine)
+	}
+	overlay = append(overlay, newLine)
+
+	overlay = append(overlay, divSt.Render(strings.Repeat("─", m.width)))
+
+	// Input / prompt line
+	var inputLine string
+	switch {
+	case m.noteDeleteConfirm:
+		inputLine = "  " + pickerCursorSt.Render("delete this note? (y/n)")
+	case m.noteEditIdx >= 0:
+		inputLine = "  edit > " + m.noteInput + "█"
+	case m.noteInput != "" || m.noteCursor == len(m.noteCands):
+		inputLine = "  new  > " + m.noteInput + "█"
+	default:
+		inputLine = "  enter to edit · esc to close"
+		inputLine = helpSt.Render(inputLine)
+	}
+	overlay = append(overlay, padToWidth(inputLine, m.width))
+
+	// Help
+	var helpText string
+	switch {
+	case m.noteDeleteConfirm:
+		helpText = "  y confirm · n/esc cancel  "
+	case m.noteInput != "" || m.noteEditIdx >= 0 || m.noteCursor == len(m.noteCands):
+		helpText = "  enter save · esc cancel  "
+	default:
+		helpText = "  j/k navigate · enter edit · d delete · esc back  "
+	}
+	overlay = append(overlay, helpSt.Render(padToWidth(helpText, m.width)))
+
+	overlayH := len(overlay)
+	contentH := m.vpH() + 1 - overlayH
+	if contentH < 0 {
+		contentH = 0
+	}
+
+	var content string
+	if contentH > 0 {
+		end := clamp(m.scroll+contentH, 0, len(m.lines))
+		rows := m.lines[m.scroll:end]
+		content = strings.Join(rows, "\n")
+		if len(rows) < contentH {
+			content += strings.Repeat("\n", contentH-len(rows))
+		}
+		content += "\n"
+	}
+
+	return m.statusBar() + "\n" + content + strings.Join(overlay, "\n")
+}
+
+// sortedVerses returns the verse numbers of the current chapter in ascending order.
+func (m model) sortedVerses() []int {
+	out := make([]int, 0, len(m.verseMap))
+	for v := range m.verseMap {
+		out = append(out, v)
+	}
+	sort.Ints(out)
+	return out
+}
+
+// ensureCursorVisible scrolls so the note-mode cursor verse stays on screen.
+func (m model) ensureCursorVisible() model {
+	if m.noteUI == noteUIOff {
+		return m
+	}
+	off, ok := m.verseMap[m.noteCursorVerse]
+	if !ok {
+		return m
+	}
+	vpH := m.vpH()
+	if off < m.scroll {
+		m.scroll = off
+	} else if off >= m.scroll+vpH-2 {
+		m.scroll = off - vpH + 3
+	}
+	return m.withScrollClamped()
+}
+
+// openInnerNote enters the per-verse note manager for the cursor verse.
+func (m model) openInnerNote() model {
+	m.noteUI = noteUIInner
+	m.noteRef = AnnotationRef{
+		Book:    m.index[m.pos].book.slug,
+		Chapter: m.index[m.pos].num,
+		Verse:   m.noteCursorVerse,
+	}
+	if m.store != nil {
+		m.noteCands = m.store.NotesAtRef(m.noteRef)
+	}
+	m.noteCursor = 0
+	m.noteInput = ""
+	m.noteEditIdx = -1
+	m.noteDeleteConfirm = false
+	return m
+}
+
+// closeInnerNote drops back to the outer note mode without leaving note mode entirely.
+func (m model) closeInnerNote() model {
+	m.noteUI = noteUIOuter
+	m.noteInput = ""
+	m.noteEditIdx = -1
+	m.noteDeleteConfirm = false
+	m.noteCands = nil
+	m = m.withContent().withScrollClamped()
+	return m
+}
+
+// updateOuterNote handles key input when navigating the annotation column.
+func (m model) updateOuterNote(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	verses := m.sortedVerses()
+	if len(verses) == 0 {
+		m.noteUI = noteUIOff
+		m = m.withContent()
+		return m, nil
+	}
+	idx := 0
+	for i, v := range verses {
+		if v == m.noteCursorVerse {
+			idx = i
+			break
+		}
+	}
+	switch msg.String() {
+	case "esc", "q":
+		m.noteUI = noteUIOff
+		m = m.withContent().withScrollClamped()
+		return m, nil
+	case "enter":
+		m = m.openInnerNote()
+		return m, nil
+	case "j", "down":
+		if idx < len(verses)-1 {
+			m.noteCursorVerse = verses[idx+1]
+			m = m.withContent()
+			m = m.ensureCursorVisible()
+		}
+		return m, nil
+	case "k", "up":
+		if idx > 0 {
+			m.noteCursorVerse = verses[idx-1]
+			m = m.withContent()
+			m = m.ensureCursorVisible()
+		}
+		return m, nil
+	case "g":
+		m.noteCursorVerse = verses[0]
+		m = m.withContent()
+		m = m.ensureCursorVisible()
+		return m, nil
+	case "G":
+		m.noteCursorVerse = verses[len(verses)-1]
+		m = m.withContent()
+		m = m.ensureCursorVisible()
+		return m, nil
+	}
+	return m, nil
+}
+
+// updateInnerNote handles key input when managing notes for a single verse.
+func (m model) updateInnerNote(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Delete confirm prompt owns the keyboard while active.
+	if m.noteDeleteConfirm {
+		switch msg.String() {
+		case "y", "Y":
+			if m.store != nil && m.noteCursor < len(m.noteCands) {
+				m.store.DeleteNoteAt(m.noteRef, m.noteCursor)
+				m.store.Save()
+				m.noteCands = m.store.NotesAtRef(m.noteRef)
+				if m.noteCursor >= len(m.noteCands) && m.noteCursor > 0 {
+					m.noteCursor--
+				}
+				m = m.withContent().withScrollClamped()
+			}
+			m.noteDeleteConfirm = false
+		default:
+			m.noteDeleteConfirm = false
+		}
+		return m, nil
+	}
+
+	editing := m.noteEditIdx >= 0 || m.noteInput != ""
+
+	switch msg.Type {
+	case tea.KeyEsc:
+		if editing && (m.noteInput != "" || m.noteEditIdx >= 0) {
+			// cancel the in-progress edit, stay in inner panel
+			m.noteInput = ""
+			m.noteEditIdx = -1
+			return m, nil
+		}
+		m = m.closeInnerNote()
+		return m, nil
+	case tea.KeyEnter:
+		if m.noteInput == "" && m.noteEditIdx < 0 {
+			// "enter" on a note row → load it for editing
+			if m.noteCursor < len(m.noteCands) {
+				m.noteInput = m.noteCands[m.noteCursor].Text
+				m.noteEditIdx = m.noteCursor
+			}
+			// "enter" on + new note row → just start typing (input stays empty)
+			return m, nil
+		}
+		// Save and return to outer note mode.
+		if m.store != nil {
+			if m.noteEditIdx >= 0 && m.noteEditIdx < len(m.noteCands) {
+				m.store.UpdateNote(m.noteRef, m.noteEditIdx, m.noteInput)
+			} else if m.noteInput != "" {
+				m.store.AddNote(m.noteRef, m.noteInput)
+			}
+			m.store.Save()
+		}
+		m = m.closeInnerNote()
+		return m, nil
+	case tea.KeyBackspace:
+		if len(m.noteInput) > 0 {
+			runes := []rune(m.noteInput)
+			m.noteInput = string(runes[:len(runes)-1])
+		}
+		return m, nil
+	case tea.KeyUp:
+		if m.noteCursor > 0 && !editing {
+			m.noteCursor--
+		}
+		return m, nil
+	case tea.KeyDown:
+		if m.noteCursor < len(m.noteCands) && !editing {
+			m.noteCursor++
+		}
+		return m, nil
+	}
+
+	if !editing {
+		switch msg.String() {
+		case "j", "down":
+			if m.noteCursor < len(m.noteCands) {
+				m.noteCursor++
+			}
+			return m, nil
+		case "k", "up":
+			if m.noteCursor > 0 {
+				m.noteCursor--
+			}
+			return m, nil
+		case "d":
+			if m.noteCursor < len(m.noteCands) {
+				m.noteDeleteConfirm = true
+			}
+			return m, nil
+		}
+	}
+
+	if msg.Type == tea.KeyRunes {
+		// Only consume keystrokes as text when the user is plausibly composing:
+		// already editing, or sitting on the "+ new note" row.
+		if editing || m.noteCursor == len(m.noteCands) {
+			m.noteInput += string(msg.Runes)
+		}
+	}
+	return m, nil
+}
+
 func (m model) View() string {
 	if !m.ready {
 		return "\n  Loading..."
@@ -478,6 +850,10 @@ func (m model) View() string {
 
 	if m.mode == modeHome {
 		return homeView(m)
+	}
+
+	if m.noteUI == noteUIInner {
+		return m.viewWithNotes()
 	}
 
 	if m.gotoOpen {
