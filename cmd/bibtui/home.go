@@ -64,6 +64,13 @@ func homeView(m model) string {
 		append([]string{title, ""}, body...)...,
 	)
 
+	// ── stats panel ────────────────────────────────────────────────────────
+	// Stacked below the resume block. Sized to terminal width.
+	statsBlock := renderHomeStats(m)
+	if statsBlock != "" {
+		block = lipgloss.JoinVertical(lipgloss.Center, block, "", statsBlock)
+	}
+
 	if !m.gotoOpen {
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, block)
 	}
@@ -117,4 +124,68 @@ func homeView(m model) string {
 	)
 
 	return homeContent + "\n" + popup + cmdBar
+}
+
+// renderHomeStats produces the activity heatmap, chapter-view sparkline, and
+// summary indicators. Sized to the current terminal width. Returns "" if
+// there's nothing to show or no room to show it.
+func renderHomeStats(m model) string {
+	if m.width < 30 || m.height < 16 {
+		return ""
+	}
+
+	// Pick a panel width that's nice and centered, capped so the heatmap
+	// doesn't sprawl on very wide terminals.
+	panelW := m.width - 8
+	if panelW > 120 {
+		panelW = 120
+	}
+	if panelW < 24 {
+		panelW = 24
+	}
+
+	// Heatmap: each day cell is 2 chars wide.
+	weeks := panelW / 2
+	if weeks > 53 {
+		weeks = 53
+	}
+	if weeks < 8 {
+		weeks = 8
+	}
+	heat := renderHeatmap(m.stats, weeks)
+	heatW := weeks * 2
+
+	// Sparkline at panel width (single line, 1 char per bucket).
+	spark := renderSparkline(m.stats, m.index, panelW)
+
+	// Indicators.
+	notes := totalNotes(m.store)
+	viewed := 0
+	total := len(m.index)
+	if m.stats != nil {
+		viewed = m.stats.ChaptersViewed(m.index)
+	}
+	pct := 0
+	if total > 0 {
+		pct = viewed * 100 / total
+	}
+	noteWord := "notes"
+	if notes == 1 {
+		noteWord = "note"
+	}
+	indicators := homeKeySt.Render(itoa(notes)) + homeSubtleSt.Render(" "+noteWord) +
+		homeSubtleSt.Render("   ·   ") +
+		homeKeySt.Render(itoa(pct)+"%") + homeSubtleSt.Render(" read ") +
+		homeSubtleSt.Render("("+itoa(viewed)+"/"+itoa(total)+")")
+
+	var rows []string
+	rows = append(rows, homeSubtleSt.Render(centerPad("activity", heatW)))
+	rows = append(rows, heat...)
+	rows = append(rows, "")
+	rows = append(rows, homeSubtleSt.Render(centerPad("chapter views", panelW)))
+	rows = append(rows, spark)
+	rows = append(rows, "")
+	rows = append(rows, indicators)
+
+	return lipgloss.JoinVertical(lipgloss.Center, rows...)
 }

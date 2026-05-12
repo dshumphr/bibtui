@@ -64,6 +64,7 @@ type model struct {
 	gotoCands    []int // indices into books[] matching current input
 	gotoCursor   int
 	store        *AnnotationStore
+	stats        *Stats
 
 	noteUI            noteUIMode
 	noteCursorVerse   int // verse highlighted in the annotation column (outer)
@@ -112,14 +113,24 @@ func (m model) applySession(s *Session) model {
 	return m
 }
 
-func initial(translations []string, store *AnnotationStore) model {
+func initial(translations []string, store *AnnotationStore, stats *Stats) model {
 	allTrans := detectTranslations()
 	return model{
 		index:        buildIndex(translations[0]),
 		translations: translations,
 		allTrans:     allTrans,
 		store:        store,
+		stats:        stats,
 	}
+}
+
+// recordView marks the currently-positioned chapter as viewed.
+func (m model) recordView() {
+	if m.stats == nil || len(m.index) == 0 {
+		return
+	}
+	r := m.index[m.pos]
+	m.stats.RecordView(r.book.slug, r.num)
 }
 
 func (m model) vpH() int {
@@ -258,6 +269,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.mode = modeReader
 					}
 					saveSession(m)
+					m.recordView()
 				}
 			case tea.KeyTab:
 				m = m.gotoComplete()
@@ -297,6 +309,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.pos = 0
 				m.scroll = 0
 				m = m.withMode(modeReader)
+				m.recordView()
 			case "g":
 				m.gotoOpen = true
 				m.gotoInput = ""
@@ -308,6 +321,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m = m.withMode(modeReader)
 					m.scroll = m.session.Scroll
 					m = m.withScrollClamped()
+					m.recordView()
 				}
 			}
 			return m, nil
@@ -357,6 +371,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m = m.withContent()
 				m.scroll = 0
 				saveSession(m)
+				m.recordView()
 			}
 		case "[":
 			if m.pos > 0 {
@@ -364,6 +379,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m = m.withContent()
 				m.scroll = 0
 				saveSession(m)
+				m.recordView()
 			}
 		case "o":
 			m.pickerOpen = true
@@ -1005,8 +1021,9 @@ func main() {
 	}
 
 	session := loadSession()
+	stats := LoadStats(defaultStatsPath)
 
-	m := initial(startTrans, store)
+	m := initial(startTrans, store, stats)
 	if len(m.index) == 0 {
 		fmt.Fprintln(os.Stderr, "no chapters found")
 		os.Exit(1)

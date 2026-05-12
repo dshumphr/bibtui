@@ -1,4 +1,6 @@
 /bibtui
 annotations.json
+session.json
+stats.json
 __pycache__/
 *.pyc
