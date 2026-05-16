@@ -50,8 +50,7 @@ const defaultStorePath = "annotations.json"
 const exampleStorePath = "annotations.example.json"
 
 type AnnotationStore struct {
-	Groups       map[string]*AnnotationGroup `json:"groups"`
-	ActiveGroups map[string]bool             `json:"active_groups"`
+	Groups map[string]*AnnotationGroup `json:"groups"`
 
 	path string `json:"-"`
 }
@@ -61,9 +60,8 @@ func NewAnnotationStore(path string) *AnnotationStore {
 		path = defaultStorePath
 	}
 	return &AnnotationStore{
-		Groups:       make(map[string]*AnnotationGroup),
-		ActiveGroups: make(map[string]bool),
-		path:         path,
+		Groups: make(map[string]*AnnotationGroup),
+		path:   path,
 	}
 }
 
@@ -114,7 +112,6 @@ func (s *AnnotationStore) Delete(group string, ref *AnnotationRef) {
 	}
 	if ref == nil {
 		delete(s.Groups, group)
-		delete(s.ActiveGroups, group)
 		return
 	}
 	filtered := g.Annotations[:0]
@@ -126,17 +123,16 @@ func (s *AnnotationStore) Delete(group string, ref *AnnotationRef) {
 	g.Annotations = filtered
 	if len(g.Annotations) == 0 {
 		delete(s.Groups, group)
-		delete(s.ActiveGroups, group)
 	}
 }
 
 // AtRef returns every active annotation that touches the given verse,
 // grouped by annotation group so the caller can render them with the
 // correct colour / intensity.
-func (s *AnnotationStore) AtRef(ref AnnotationRef) []GroupAnnotation {
+func (s *AnnotationStore) AtRef(ref AnnotationRef, active map[string]bool) []GroupAnnotation {
 	var out []GroupAnnotation
 	for name, g := range s.Groups {
-		if !s.ActiveGroups[name] {
+		if !active[name] {
 			continue
 		}
 		for _, a := range g.Annotations {
@@ -158,14 +154,6 @@ func (s *AnnotationStore) AtRef(ref AnnotationRef) []GroupAnnotation {
 	return out
 }
 
-// ToggleGroup turns a group's visibility on screen on or off.
-func (s *AnnotationStore) ToggleGroup(name string) {
-	if _, ok := s.Groups[name]; !ok {
-		return
-	}
-	s.ActiveGroups[name] = !s.ActiveGroups[name]
-}
-
 func (s *AnnotationStore) sortGroup(g *AnnotationGroup) {
 	sort.Slice(g.Annotations, func(i, j int) bool {
 		ri, rj := g.Annotations[i].Ref, g.Annotations[j].Ref
@@ -184,8 +172,7 @@ func (s *AnnotationStore) sortGroup(g *AnnotationGroup) {
 const notesGroupName = "notes"
 const notesGroupColor = "#66AA66"
 
-// EnsureNotesGroup creates the "notes" group if it doesn't exist and ensures
-// it is active so notes are visible.
+// EnsureNotesGroup creates the "notes" group if it doesn't exist.
 func (s *AnnotationStore) EnsureNotesGroup() {
 	if _, ok := s.Groups[notesGroupName]; !ok {
 		s.Groups[notesGroupName] = &AnnotationGroup{
@@ -193,7 +180,6 @@ func (s *AnnotationStore) EnsureNotesGroup() {
 			Color: notesGroupColor,
 		}
 	}
-	s.ActiveGroups[notesGroupName] = true
 }
 
 // NotesAtRef returns all annotations in the "notes" group matching ref.
@@ -256,10 +242,6 @@ func (s *AnnotationStore) DeleteNoteAt(ref AnnotationRef, idx int) {
 	}
 	pos := positions[idx]
 	g.Annotations = append(g.Annotations[:pos], g.Annotations[pos+1:]...)
-	if len(g.Annotations) == 0 {
-		delete(s.Groups, notesGroupName)
-		delete(s.ActiveGroups, notesGroupName)
-	}
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────

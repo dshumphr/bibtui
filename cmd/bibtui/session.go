@@ -9,11 +9,12 @@ import (
 const defaultSessionPath = "session.json"
 
 type Session struct {
-	BookSlug     string    `json:"book"`
-	Chapter      int       `json:"chapter"`
-	Scroll       int       `json:"scroll"`
-	Translations []string  `json:"translations"`
-	SavedAt      time.Time `json:"saved_at"`
+	BookSlug     string          `json:"book"`
+	Chapter      int             `json:"chapter"`
+	Scroll       int             `json:"scroll"`
+	Translations []string        `json:"translations"`
+	ActiveGroups map[string]bool `json:"active_groups"`
+	SavedAt      time.Time       `json:"saved_at"`
 }
 
 func saveSession(m model) {
@@ -21,11 +22,16 @@ func saveSession(m model) {
 		return
 	}
 	r := m.index[m.pos]
+	activeGroups := make(map[string]bool, len(m.activeGroups))
+	for k, v := range m.activeGroups {
+		activeGroups[k] = v
+	}
 	s := Session{
 		BookSlug:     r.book.slug,
 		Chapter:      r.num,
 		Scroll:       m.scroll,
 		Translations: m.translations,
+		ActiveGroups: activeGroups,
 		SavedAt:      time.Now(),
 	}
 	data, err := json.MarshalIndent(s, "", "  ")

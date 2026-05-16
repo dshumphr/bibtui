@@ -66,6 +66,8 @@ type model struct {
 	store        *AnnotationStore
 	stats        *Stats
 
+	activeGroups map[string]bool
+
 	noteUI            noteUIMode
 	noteCursorVerse   int // verse highlighted in the annotation column (outer)
 	noteRef           AnnotationRef
@@ -110,17 +112,30 @@ func (m model) applySession(s *Session) model {
 		}
 	}
 	m.scroll = s.Scroll
+	if s.ActiveGroups != nil {
+		m.activeGroups = make(map[string]bool, len(s.ActiveGroups))
+		for k, v := range s.ActiveGroups {
+			m.activeGroups[k] = v
+		}
+	}
 	return m
 }
 
 func initial(translations []string, store *AnnotationStore, stats *Stats) model {
 	allTrans := detectTranslations()
+	activeGroups := make(map[string]bool)
+	if store != nil {
+		for name := range store.Groups {
+			activeGroups[name] = true
+		}
+	}
 	return model{
 		index:        buildIndex(translations[0]),
 		translations: translations,
 		allTrans:     allTrans,
 		store:        store,
 		stats:        stats,
+		activeGroups: activeGroups,
 	}
 }
 
@@ -174,7 +189,7 @@ func (m model) withContent() model {
 	if m.noteUI != noteUIOff {
 		cursor = m.noteCursorVerse
 	}
-	m.lines, m.verseMap = buildContent(m.index[m.pos], m.translations, m.store, m.width, cursor, m.noteUI != noteUIOff)
+	m.lines, m.verseMap = buildContent(m.index[m.pos], m.translations, m.store, m.activeGroups, m.width, cursor, m.noteUI != noteUIOff)
 	return m
 }
 
@@ -408,7 +423,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			idx-- // 1-based key → 0-based index
 			names := sortedGroupNames(m.store)
 			if idx < len(names) {
-				m.store.ToggleGroup(names[idx])
+				m.activeGroups[names[idx]] = !m.activeGroups[names[idx]]
 				m = m.withContent().withScrollClamped()
 			}
 		}
@@ -426,7 +441,7 @@ func (m model) statusBar() string {
 	if m.store != nil {
 		var active []string
 		for _, name := range sortedGroupNames(m.store) {
-			if m.store.ActiveGroups[name] {
+			if m.activeGroups[name] {
 				active = append(active, name)
 			}
 		}
@@ -827,6 +842,7 @@ func (m model) updateInnerNote(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.store.UpdateNote(m.noteRef, m.noteEditIdx, m.noteInput)
 			} else if m.noteInput != "" {
 				m.store.AddNote(m.noteRef, m.noteInput)
+				m.activeGroups[notesGroupName] = true
 			}
 			m.store.Save()
 		}
@@ -985,10 +1001,6 @@ func main() {
 	store := NewAnnotationStore(defaultStorePath)
 	if err := store.Load(); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not load annotations: %v\n", err)
-	}
-	// Auto-activate every group on startup so the prototype is immediately visible.
-	for name := range store.Groups {
-		store.ActiveGroups[name] = true
 	}
 
 	startTrans := os.Args[1:]

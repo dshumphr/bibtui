@@ -97,11 +97,11 @@ func renderVerseLines(v verse, paneW int) []string {
 // renderAnnotations returns display lines for every active annotation that
 // touches the given canonical verse reference.  Lines are wrapped to aw
 // (annotation-column width) and styled with the group's colour and intensity.
-func renderAnnotations(store *AnnotationStore, ref AnnotationRef, aw int) []string {
+func renderAnnotations(store *AnnotationStore, active map[string]bool, ref AnnotationRef, aw int) []string {
 	if store == nil || aw <= 0 {
 		return nil
 	}
-	anns := store.AtRef(ref)
+	anns := store.AtRef(ref, active)
 	if len(anns) == 0 {
 		return nil
 	}
@@ -136,7 +136,7 @@ func renderAnnotations(store *AnnotationStore, ref AnnotationRef, aw int) []stri
 // column is reserved so that annotations can be shown aligned with the verses
 // they annotate.  The returned map records the starting line offset for each
 // verse number (used for verse-level scrolling).
-func buildContent(c ref, translations []string, store *AnnotationStore, totalW int, cursorVerse int, noteMode bool) ([]string, map[int]int) {
+func buildContent(c ref, translations []string, store *AnnotationStore, active map[string]bool, totalW int, cursorVerse int, noteMode bool) ([]string, map[int]int) {
 	n := len(translations)
 	if n == 0 {
 		return nil, nil
@@ -145,7 +145,7 @@ func buildContent(c ref, translations []string, store *AnnotationStore, totalW i
 	// Decide whether we need an annotation column.
 	hasAnnCol := false
 	if store != nil {
-		for _, on := range store.ActiveGroups {
+		for _, on := range active {
 			if on {
 				hasAnnCol = true
 				break
@@ -184,7 +184,7 @@ func buildContent(c ref, translations []string, store *AnnotationStore, totalW i
 	if hasAnnCol {
 		activeNames := []string{}
 		for _, name := range sortedGroupNames(store) {
-			if store.ActiveGroups[name] {
+			if active[name] {
 				activeNames = append(activeNames, name)
 			}
 		}
@@ -254,7 +254,7 @@ func buildContent(c ref, translations []string, store *AnnotationStore, totalW i
 						innerW = 1
 					}
 				}
-				rawLines := renderAnnotations(store, annRef, innerW)
+				rawLines := renderAnnotations(store, active, annRef, innerW)
 				if noteMode && len(rawLines) == 0 {
 					rawLines = []string{padToWidth(noteAddSt.Render("+ add note"), innerW)}
 				}
