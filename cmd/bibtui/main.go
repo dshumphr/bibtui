@@ -1050,6 +1050,9 @@ func main() {
 	if err := store.Load(); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not load annotations: %v\n", err)
 	}
+	if err := store.LoadGenerated(divergenceStorePath); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not load divergence data: %v\n", err)
+	}
 
 	startTrans := os.Args[1:]
 	if len(startTrans) == 0 {

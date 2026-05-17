@@ -42,12 +42,14 @@ type AnnotationGroup struct {
 	Name        string       `json:"name"`
 	Color       string       `json:"color"` // lipgloss-compatible hex or name
 	Annotations []Annotation `json:"annotations"`
+	Generated   bool         `json:"-"`
 }
 
 // ── store ─────────────────────────────────────────────────────────────────
 
 const defaultStorePath = "annotations.json"
 const exampleStorePath = "annotations.example.json"
+const divergenceStorePath = "divergence.json"
 
 type AnnotationStore struct {
 	Groups map[string]*AnnotationGroup `json:"groups"`
@@ -82,11 +84,36 @@ func (s *AnnotationStore) Load() error {
 }
 
 func (s *AnnotationStore) Save() error {
-	data, err := json.MarshalIndent(s, "", "  ")
+	saveable := &AnnotationStore{Groups: make(map[string]*AnnotationGroup)}
+	for name, g := range s.Groups {
+		if !g.Generated {
+			saveable.Groups[name] = g
+		}
+	}
+	data, err := json.MarshalIndent(saveable, "", "  ")
 	if err != nil {
 		return err
 	}
 	return os.WriteFile(s.path, data, 0644)
+}
+
+func (s *AnnotationStore) LoadGenerated(path string) error {
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var tmp AnnotationStore
+	if err := json.Unmarshal(data, &tmp); err != nil {
+		return err
+	}
+	for name, g := range tmp.Groups {
+		g.Generated = true
+		s.Groups[name] = g
+	}
+	return nil
 }
 
 // Add creates a new annotation inside the named group.
