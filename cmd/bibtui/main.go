@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"sort"
-	"strconv"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -67,6 +66,9 @@ type model struct {
 	stats        *Stats
 
 	activeGroups map[string]bool
+
+	groupPickerOpen bool
+	groupPickerIdx  int
 
 	noteUI            noteUIMode
 	noteCursorVerse   int // verse highlighted in the annotation column (outer)
@@ -363,6 +365,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		if m.groupPickerOpen {
+			switch msg.String() {
+			case "q", "esc":
+				m.groupPickerOpen = false
+			case "j", "down":
+				names := sortedGroupNames(m.store)
+				if m.groupPickerIdx < len(names)-1 {
+					m.groupPickerIdx++
+				}
+			case "k", "up":
+				if m.groupPickerIdx > 0 {
+					m.groupPickerIdx--
+				}
+			case " ", "enter":
+				names := sortedGroupNames(m.store)
+				if m.groupPickerIdx < len(names) {
+					name := names[m.groupPickerIdx]
+					m.activeGroups[name] = !m.activeGroups[name]
+					m = m.withContent().withScrollClamped()
+				}
+			}
+			return m, nil
+		}
+
 		switch msg.String() {
 		case "q", "ctrl+c":
 			saveSession(m)
@@ -415,16 +441,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m = m.ensureCursorVisible()
 				}
 			}
-		case "1", "2", "3", "4", "5", "6", "7", "8", "9":
-			if m.store == nil {
-				break
-			}
-			idx, _ := strconv.Atoi(msg.String())
-			idx-- // 1-based key → 0-based index
-			names := sortedGroupNames(m.store)
-			if idx < len(names) {
-				m.activeGroups[names[idx]] = !m.activeGroups[names[idx]]
-				m = m.withContent().withScrollClamped()
+		case "a":
+			if m.store != nil && len(sortedGroupNames(m.store)) > 0 {
+				m.groupPickerOpen = true
+				m.groupPickerIdx = 0
 			}
 		}
 	}
@@ -502,13 +522,15 @@ func (m model) helpBar() string {
 	if m.pickerOpen {
 		return helpSt.Render("  space toggle  ·  j/k move  ·  q/esc close")
 	}
+	if m.groupPickerOpen {
+		return helpSt.Render("  space toggle  ·  j/k move  ·  q/esc close")
+	}
 	if m.noteUI == noteUIOuter {
 		return helpSt.Render("  j/k verse  ·  enter open  ·  esc exit note mode")
 	}
-	groups := sortedGroupNames(m.store)
 	var groupHelp string
-	if len(groups) > 0 {
-		groupHelp = " ·  1-" + strconv.Itoa(clamp(len(groups), 1, 9)) + " toggle groups"
+	if len(sortedGroupNames(m.store)) > 0 {
+		groupHelp = " ·  a groups"
 	}
 	return helpSt.Render("  j/k scroll  ·  [/] chapter  ·  : goto  ·  o translations  ·  n notes" + groupHelp + "  ·  q quit")
 }
@@ -958,6 +980,10 @@ func (m model) View() string {
 		return m.statusBar() + "\n" + m.pickerContent() + "\n" + m.helpBar()
 	}
 
+	if m.groupPickerOpen {
+		return m.statusBar() + "\n" + m.groupPickerContent() + "\n" + m.helpBar()
+	}
+
 	vpH := m.vpH()
 	end := clamp(m.scroll+vpH, 0, len(m.lines))
 	rows := m.lines[m.scroll:end]
@@ -981,6 +1007,28 @@ func (m model) pickerContent() string {
 		}
 		line := fmt.Sprintf("%s[%s] %s", cursor, check, strings.ToUpper(t))
 		if i == m.pickerIdx {
+			line = pickerCursorSt.Render(line)
+		}
+		rows = append(rows, line)
+	}
+	box := pickerBorderSt.Render(strings.Join(rows, "\n"))
+	return lipgloss.Place(m.width, m.vpH(), lipgloss.Center, lipgloss.Center, box)
+}
+
+func (m model) groupPickerContent() string {
+	var rows []string
+	names := sortedGroupNames(m.store)
+	for i, name := range names {
+		cursor := "  "
+		if i == m.groupPickerIdx {
+			cursor = "▶ "
+		}
+		check := " "
+		if m.activeGroups[name] {
+			check = "✓"
+		}
+		line := fmt.Sprintf("%s[%s] %s", cursor, check, name)
+		if i == m.groupPickerIdx {
 			line = pickerCursorSt.Render(line)
 		}
 		rows = append(rows, line)
