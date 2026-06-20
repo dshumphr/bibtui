@@ -8,3 +8,4 @@ Settle into the following Design Principles:
 5. Sell To Your User - Do Not Sell Your User's Attention To Others.
 6. Files Over Apps - a la Obsidian.
 7. Know Thyself - You Are Precisely As Capable As You Are, No More, No Less. Embrace This.
+8. Strive For Tight Improvement Loops - Development iterations are sped up through a fast test cycle, just as overall product improvement is driven by implicit user feedback (ie actions, like click through rate).
