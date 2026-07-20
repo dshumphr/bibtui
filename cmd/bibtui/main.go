@@ -29,7 +29,7 @@ func detectTranslations() []string {
 type appMode int
 
 const (
-	modeHome   appMode = iota
+	modeHome appMode = iota
 	modeReader
 )
 
@@ -44,13 +44,13 @@ const (
 // ── model ─────────────────────────────────────────────────────────────────
 
 type model struct {
-	mode    appMode
-	session *Session // last loaded session, shown on home screen
+	mode         appMode
+	session      *Session // last loaded session, shown on home screen
 	index        []ref
 	pos          int
-	translations []string // active translations
-	allTrans     []string // all detected translations
-	lines        []string // pre-rendered combined display lines
+	translations []string    // active translations
+	allTrans     []string    // all detected translations
+	lines        []string    // pre-rendered combined display lines
 	verseMap     map[int]int // verse number → line offset within m.lines
 	scroll       int
 	width        int
@@ -79,6 +79,10 @@ type model struct {
 	noteInputCursor   int  // rune index within noteInput
 	noteEditIdx       int  // -1 = creating new, >=0 = editing existing index
 	noteDeleteConfirm bool // y/n prompt for deletion
+
+	proxStream string // non-empty = AI integration enabled, else feature is entirely inert
+	askOpen    bool
+	askInput   string
 }
 
 // withMode switches the app mode and triggers a content rebuild when entering
@@ -287,6 +291,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					saveSession(m)
 					m.recordView()
+					m.emit("read.location", m.proxLocationBody())
 				}
 			case tea.KeyTab:
 				m = m.gotoComplete()
@@ -311,6 +316,36 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		if m.askOpen {
+			switch msg.Type {
+			case tea.KeyEsc:
+				m.askOpen = false
+				m.askInput = ""
+			case tea.KeyEnter:
+				text := strings.TrimSpace(m.askInput)
+				m.askOpen = false
+				m.askInput = ""
+				if text != "" {
+					ref := m.activeRef()
+					m.emit("user.message", map[string]any{
+						"text":    text,
+						"book":    ref.Book,
+						"chapter": ref.Chapter,
+						"verse":   ref.Verse,
+						"ref":     ref.String(),
+					})
+				}
+			case tea.KeyBackspace:
+				if len(m.askInput) > 0 {
+					runes := []rune(m.askInput)
+					m.askInput = string(runes[:len(runes)-1])
+				}
+			case tea.KeyRunes:
+				m.askInput += string(msg.Runes)
+			}
+			return m, nil
+		}
+
 		if m.noteUI == noteUIInner {
 			return m.updateInnerNote(msg)
 		}
@@ -327,6 +362,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.scroll = 0
 				m = m.withMode(modeReader)
 				m.recordView()
+				m.emit("read.location", m.proxLocationBody())
 			case "g":
 				m.gotoOpen = true
 				m.gotoInput = ""
@@ -339,6 +375,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.scroll = m.session.Scroll
 					m = m.withScrollClamped()
 					m.recordView()
+					m.emit("read.location", m.proxLocationBody())
 				}
 			}
 			return m, nil
@@ -360,6 +397,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.pickerIdx < len(m.allTrans) {
 					m = m.withToggled(m.allTrans[m.pickerIdx])
 					m = m.withContent().withScrollClamped()
+					m.emit("read.translations", map[string]any{"translations": m.translations})
 				}
 			}
 			return m, nil
@@ -384,6 +422,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					name := names[m.groupPickerIdx]
 					m.activeGroups[name] = !m.activeGroups[name]
 					m = m.withContent().withScrollClamped()
+					m.emit("annotation.groups_changed", map[string]any{"active": m.activeGroups})
 				}
 			}
 			return m, nil
@@ -413,6 +452,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.scroll = 0
 				saveSession(m)
 				m.recordView()
+				m.emit("read.location", m.proxLocationBody())
 			}
 		case "[":
 			if m.pos > 0 {
@@ -421,6 +461,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.scroll = 0
 				saveSession(m)
 				m.recordView()
+				m.emit("read.location", m.proxLocationBody())
 			}
 		case "o":
 			m.pickerOpen = true
@@ -445,6 +486,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.store != nil && len(sortedGroupNames(m.store)) > 0 {
 				m.groupPickerOpen = true
 				m.groupPickerIdx = 0
+			}
+		case "?":
+			if m.proxStream != "" {
+				m.askOpen = true
+				m.askInput = ""
 			}
 		}
 	}
@@ -532,7 +578,11 @@ func (m model) helpBar() string {
 	if len(sortedGroupNames(m.store)) > 0 {
 		groupHelp = " ·  a groups"
 	}
-	return helpSt.Render("  j/k scroll  ·  [/] chapter  ·  : goto  ·  o translations  ·  n notes" + groupHelp + "  ·  q quit")
+	var askHelp string
+	if m.proxStream != "" {
+		askHelp = " ·  ? ask"
+	}
+	return helpSt.Render("  j/k scroll  ·  [/] chapter  ·  : goto  ·  o translations  ·  n notes" + groupHelp + askHelp + "  ·  q quit")
 }
 
 // viewWithGoto renders the normal content but shrinks it to make room for
@@ -821,6 +871,7 @@ func (m model) updateInnerNote(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.store != nil && m.noteCursor < len(m.noteCands) {
 				m.store.DeleteNoteAt(m.noteRef, m.noteCursor)
 				m.store.Save()
+				m.emit("note.deleted", map[string]any{})
 				m.noteCands = m.store.NotesAtRef(m.noteRef)
 				if m.noteCursor >= len(m.noteCands) && m.noteCursor > 0 {
 					m.noteCursor--
@@ -862,9 +913,16 @@ func (m model) updateInnerNote(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.store != nil {
 			if m.noteEditIdx >= 0 && m.noteEditIdx < len(m.noteCands) {
 				m.store.UpdateNote(m.noteRef, m.noteEditIdx, m.noteInput)
+				m.emit("note.updated", map[string]any{"text": m.noteInput})
 			} else if m.noteInput != "" {
 				m.store.AddNote(m.noteRef, m.noteInput)
 				m.activeGroups[notesGroupName] = true
+				m.emit("note.created", map[string]any{
+					"book":    m.noteRef.Book,
+					"chapter": m.noteRef.Chapter,
+					"verse":   m.noteRef.Verse,
+					"text":    m.noteInput,
+				})
 			}
 			m.store.Save()
 		}
@@ -976,6 +1034,10 @@ func (m model) View() string {
 		return m.viewWithGoto()
 	}
 
+	if m.askOpen {
+		return m.viewWithAsk()
+	}
+
 	if m.pickerOpen {
 		return m.statusBar() + "\n" + m.pickerContent() + "\n" + m.helpBar()
 	}
@@ -992,6 +1054,24 @@ func (m model) View() string {
 		content += strings.Repeat("\n", vpH-len(rows))
 	}
 	return m.statusBar() + "\n" + content + "\n" + m.helpBar()
+}
+
+// viewWithAsk renders the normal content but reserves the bottom line for
+// the "ask the agent" input — the send-half of the user.message flow.
+func (m model) viewWithAsk() string {
+	vpH := m.vpH() - 1
+	if vpH < 1 {
+		vpH = 1
+	}
+	end := clamp(m.scroll+vpH, 0, len(m.lines))
+	rows := m.lines[m.scroll:end]
+	content := strings.Join(rows, "\n")
+	if len(rows) < vpH {
+		content += strings.Repeat("\n", vpH-len(rows))
+	}
+	askBar := helpSt.Render(padToWidth(
+		"  "+pickerCursorSt.Render("?")+" "+m.askInput+"█"+"    enter ask  ·  esc cancel", m.width))
+	return m.statusBar() + "\n" + content + "\n" + askBar
 }
 
 func (m model) pickerContent() string {
@@ -1054,7 +1134,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "warning: could not load divergence data: %v\n", err)
 	}
 
-	startTrans := os.Args[1:]
+	proxStream, startTrans := parseArgs(os.Args[1:])
 	if len(startTrans) == 0 {
 		startTrans = []string{"kjv"}
 		found := false
@@ -1094,9 +1174,18 @@ func main() {
 	m.session = session
 	m.mode = modeHome
 
+	if proxStream != "" && bootstrapProxenos(proxStream) {
+		m.proxStream = proxStream
+	}
+	if m.proxStream != "" {
+		m.emit("app.started", map[string]any{"translations": startTrans, "resumed": session != nil})
+	}
+
 	p := tea.NewProgram(m, tea.WithAltScreen())
-	if _, err := p.Run(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+	_, runErr := p.Run()
+	m.emitSync("app.exited", map[string]any{})
+	if runErr != nil {
+		fmt.Fprintln(os.Stderr, runErr)
 		os.Exit(1)
 	}
 }

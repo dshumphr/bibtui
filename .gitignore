@@ -2,5 +2,6 @@
 annotations.json
 session.json
 stats.json
+proxenos.log
 __pycache__/
 *.pyc

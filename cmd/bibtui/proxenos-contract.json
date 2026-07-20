@@ -1,0 +1,34 @@
+{
+  "v": 1,
+  "id": "01BIBTUICONTRACT0000000001",
+  "ts": "2026-07-19T00:00:00.000Z",
+  "src": "app:bibtui",
+  "type": "stream.contract",
+  "body": {
+    "name": "bibtui",
+    "about": "Terminal Bible-study companion: synced multi-translation reading, verse-level annotations/notes, vim-like navigation. You are attached to the user's live reading session in their terminal.",
+    "emits": {
+      "app.started": {"translations": ["kjv"], "resumed": true},
+      "read.location": {"translations": ["kjv", "web"], "book": "john", "chapter": 3, "ref": "John 3"},
+      "read.translations": {"translations": ["kjv", "web", "bsb"]},
+      "annotation.groups_changed": {"active": {"notes": true, "crossrefs": true, "greek": false}},
+      "note.created": {"id": "01NOTEXXXXXXXXXXXXXXXXXXXX", "author": "user", "book": "john", "chapter": 3, "verse": 16, "text": "The Word is Logos..."},
+      "note.updated": {"id": "01NOTEXXXXXXXXXXXXXXXXXXXX", "text": "revised text"},
+      "note.deleted": {"id": "01NOTEXXXXXXXXXXXXXXXXXXXX"},
+      "user.message": {"text": "what's the Greek behind 'Word' here?", "book": "john", "chapter": 3, "verse": 16, "ref": "John 3:16"},
+      "action.rejected": {"action": "note.delete", "id": "01NOTEXXXXXXXXXXXXXXXXXXXX", "reason": "not authored by this agent"},
+      "app.exited": {}
+    },
+    "accepts": {
+      "nav.goto": {"book": "john", "chapter": 3, "verse": 16},
+      "nav.step": {"direction": "next"},
+      "translations.set": {"translations": ["kjv", "web"]},
+      "groups.set": {"active": {"crossrefs": true, "greek": false}},
+      "note.create": {"id": "stable-id-you-choose", "book": "john", "chapter": 3, "verse": 16, "text": "markdown note text"},
+      "note.update": {"id": "stable-id-you-choose", "text": "revised text"},
+      "note.delete": {"id": "stable-id-you-choose"},
+      "answer": {"text": "...", "refs": ["John 3:16"]}
+    },
+    "instructions": "You are attached to the user's live bibtui reading session. read.location tells you where they are reading (each user.message already carries the current book/chapter/verse too); user.message is every question or imperative they type ('summarize this', 'go to Romans 8', 'note that...') — one canonical type for both. Reply to user.message ONLY by sending an 'answer' event, always citing refs — NEVER answer in your own chat/transcript, the user cannot see it. To act in the app (navigate, change translations/annotation groups, take notes) send the matching accepts event; it takes effect immediately on the user's screen, exactly as if they had pressed the key themselves. note.create/note.update ids are stable and caller-chosen: reusing an id overwrites that note. You may only note.update/note.delete an id YOU created with note.create — never touch a note whose author is 'user'; a disallowed delete/update comes back as action.rejected. Do not send nav.goto/translations.set/groups.set/note.create speculatively — only in direct response to something the user asked for; you are a guest driving their screen, not a second pilot. Send with: proxenos send bibtui <type> '<json>'"
+  }
+}
