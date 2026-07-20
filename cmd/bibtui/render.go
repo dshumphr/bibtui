@@ -47,6 +47,10 @@ var (
 			Foreground(lipgloss.AdaptiveColor{Light: "#888888", Dark: "#666666"})
 
 	inputCursorSt = lipgloss.NewStyle().Reverse(true)
+
+	breadcrumbMultiSt = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.AdaptiveColor{Light: "#888888", Dark: "#999999"})
 )
 
 // ── content rendering ─────────────────────────────────────────────────────
@@ -74,13 +78,20 @@ func bookBanner(bookName string, width int) []string {
 }
 
 // renderVerseLines renders a single verse into display lines for a pane of
-// width paneW, with an inline verse number and word-wrapped text.
-func renderVerseLines(v verse, paneW int) []string {
+// width paneW, with an inline verse number and word-wrapped text. marker,
+// if non-empty, is a pre-styled single character (see breadcrumbMarker)
+// rendered in the trailing gutter cell right after the verse number — an
+// empty marker falls back to a plain space, so annotated and unannotated
+// verses line up identically either way.
+func renderVerseLines(v verse, paneW int, marker string) []string {
 	textW := paneW - leftMargin - numCols - 1
 	if textW < 10 {
 		textW = 10
 	}
-	num := verseNumSt.Render(fmt.Sprintf("%3d ", v.num))
+	if marker == "" {
+		marker = " "
+	}
+	num := verseNumSt.Render(fmt.Sprintf("%3d", v.num)) + marker
 	cont := strings.Repeat(" ", leftMargin+numCols)
 	wrapped := wordWrap(v.text, textW)
 	var lines []string
@@ -92,6 +103,32 @@ func renderVerseLines(v verse, paneW int) []string {
 		}
 	}
 	return lines
+}
+
+// breadcrumbMarker returns a styled "•" for a verse carrying an
+// annotation the side column isn't currently showing — colored in the
+// touching group's color when exactly one group touches this verse, or
+// a neutral color when more than one does (picking one color among
+// several would misrepresent what's there). Returns "" when nothing is
+// hidden at ref, so the caller's layout doesn't shift.
+func breadcrumbMarker(store *AnnotationStore, hidden map[string]bool, ref AnnotationRef) string {
+	if store == nil || len(hidden) == 0 {
+		return ""
+	}
+	anns := store.AtRef(ref, hidden)
+	if len(anns) == 0 {
+		return ""
+	}
+	colors := map[string]bool{}
+	for _, a := range anns {
+		colors[a.Group.Color] = true
+	}
+	if len(colors) == 1 {
+		for c := range colors {
+			return lipgloss.NewStyle().Foreground(lipgloss.Color(c)).Render("•")
+		}
+	}
+	return breadcrumbMultiSt.Render("•")
 }
 
 // renderAnnotations returns display lines for every active annotation that
@@ -154,6 +191,19 @@ func buildContent(c ref, translations []string, store *AnnotationStore, active m
 	}
 	if noteMode {
 		hasAnnCol = true
+	}
+
+	// Groups whose annotations aren't already visible in the side column
+	// — every group if the column is closed, only the inactive ones if
+	// it's open — computed once and reused per verse by breadcrumbMarker.
+	hiddenGroups := map[string]bool{}
+	if store != nil {
+		for name := range store.Groups {
+			if hasAnnCol && active[name] {
+				continue
+			}
+			hiddenGroups[name] = true
+		}
 	}
 
 	// Allocate widths: translation panes + optional annotation pane.
@@ -222,18 +272,10 @@ func buildContent(c ref, translations []string, store *AnnotationStore, active m
 	// For each verse slot, render all panes plus optional annotations.
 	for vi := 0; vi < maxV; vi++ {
 		lineOffset := len(result)
-		paneLines := make([][]string, n)
-		maxH := 0
-		for pi := range translations {
-			if vi < len(allVerses[pi]) {
-				paneLines[pi] = renderVerseLines(allVerses[pi][vi], pw)
-			}
-			if len(paneLines[pi]) > maxH {
-				maxH = len(paneLines[pi])
-			}
-		}
 
-		var annLines []string
+		// Determine this verse-slot's canonical number first — needed
+		// before rendering any pane, since the breadcrumb marker (and
+		// verseMap) don't depend on which translation we're looking at.
 		vnum := 0
 		for pi := 0; pi < n; pi++ {
 			if vi < len(allVerses[pi]) {
@@ -244,35 +286,52 @@ func buildContent(c ref, translations []string, store *AnnotationStore, active m
 		if vnum > 0 {
 			verseMap[vnum] = lineOffset
 		}
-		if hasAnnCol {
-			if vnum > 0 {
-				annRef := AnnotationRef{Book: c.book.slug, Chapter: c.num, Verse: vnum}
-				innerW := aw
-				if noteMode {
-					innerW = aw - 2
-					if innerW < 1 {
-						innerW = 1
+
+		var annRef AnnotationRef
+		marker := ""
+		if vnum > 0 {
+			annRef = AnnotationRef{Book: c.book.slug, Chapter: c.num, Verse: vnum}
+			marker = breadcrumbMarker(store, hiddenGroups, annRef)
+		}
+
+		paneLines := make([][]string, n)
+		maxH := 0
+		for pi := range translations {
+			if vi < len(allVerses[pi]) {
+				paneLines[pi] = renderVerseLines(allVerses[pi][vi], pw, marker)
+			}
+			if len(paneLines[pi]) > maxH {
+				maxH = len(paneLines[pi])
+			}
+		}
+
+		var annLines []string
+		if hasAnnCol && vnum > 0 {
+			innerW := aw
+			if noteMode {
+				innerW = aw - 2
+				if innerW < 1 {
+					innerW = 1
+				}
+			}
+			rawLines := renderAnnotations(store, active, annRef, innerW)
+			if noteMode && len(rawLines) == 0 {
+				rawLines = []string{padToWidth(noteAddSt.Render("+ add note"), innerW)}
+			}
+			if noteMode {
+				annLines = make([]string, len(rawLines))
+				for i, l := range rawLines {
+					gutter := "  "
+					if vnum == cursorVerse && i == 0 {
+						gutter = noteCursorSt.Render("▸ ")
 					}
+					annLines[i] = gutter + l
 				}
-				rawLines := renderAnnotations(store, active, annRef, innerW)
-				if noteMode && len(rawLines) == 0 {
-					rawLines = []string{padToWidth(noteAddSt.Render("+ add note"), innerW)}
-				}
-				if noteMode {
-					annLines = make([]string, len(rawLines))
-					for i, l := range rawLines {
-						gutter := "  "
-						if vnum == cursorVerse && i == 0 {
-							gutter = noteCursorSt.Render("▸ ")
-						}
-						annLines[i] = gutter + l
-					}
-				} else {
-					annLines = rawLines
-				}
-				if len(annLines) > maxH {
-					maxH = len(annLines)
-				}
+			} else {
+				annLines = rawLines
+			}
+			if len(annLines) > maxH {
+				maxH = len(annLines)
 			}
 		}
 
