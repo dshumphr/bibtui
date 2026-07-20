@@ -434,7 +434,7 @@ func (m model) applyTranslationsSet(msg proxTranslationsSetMsg) (model, bool, st
 	}
 	sort.Strings(valid)
 	m.translations = valid
-	m = m.withContent().withScrollClamped()
+	m = m.withContentAnchored()
 	m.emit("read.translations", map[string]any{"translations": m.translations})
 	return m, true, ""
 }
@@ -460,7 +460,7 @@ func (m model) applyGroupsSet(msg proxGroupsSetMsg) (model, bool, string) {
 	if !applied {
 		return m, false, "no known group names"
 	}
-	m = m.withContent().withScrollClamped()
+	m = m.withContentAnchored()
 	m.emit("annotation.groups_changed", map[string]any{"active": m.activeGroups})
 	return m, true, ""
 }
@@ -481,7 +481,7 @@ func (m model) applyNoteCreate(msg proxNoteCreateMsg) (model, bool, string) {
 	}
 	m.store.Save()
 	m.activeGroups[notesGroupName] = true
-	m = m.withContent().withScrollClamped()
+	m = m.withContentAnchored()
 	return m, true, ""
 }
 
@@ -493,7 +493,7 @@ func (m model) applyNoteUpdate(msg proxNoteUpdateMsg) (model, bool, string) {
 		return m, false, proxNoteErrorReason(err)
 	}
 	m.store.Save()
-	m = m.withContent().withScrollClamped()
+	m = m.withContentAnchored()
 	return m, true, ""
 }
 
@@ -505,7 +505,7 @@ func (m model) applyNoteDelete(msg proxNoteDeleteMsg) (model, bool, string) {
 		return m, false, proxNoteErrorReason(err)
 	}
 	m.store.Save()
-	m = m.withContent().withScrollClamped()
+	m = m.withContentAnchored()
 	return m, true, ""
 }
 

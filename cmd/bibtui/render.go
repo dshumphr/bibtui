@@ -58,6 +58,9 @@ var (
 const (
 	leftMargin = 2
 	numCols    = 4 // "NNN " — fits up to 3-digit verse numbers
+	markerColW = 1 // breadcrumb gutter: always at the far right, at the
+	// same horizontal position the annotation column's left edge sits at
+	// when it's open — "look over there," not "look at the verse number"
 )
 
 // bookBanner returns the lines for the "THE BOOK OF X" header shown above
@@ -78,20 +81,13 @@ func bookBanner(bookName string, width int) []string {
 }
 
 // renderVerseLines renders a single verse into display lines for a pane of
-// width paneW, with an inline verse number and word-wrapped text. marker,
-// if non-empty, is a pre-styled single character (see breadcrumbMarker)
-// rendered in the trailing gutter cell right after the verse number — an
-// empty marker falls back to a plain space, so annotated and unannotated
-// verses line up identically either way.
-func renderVerseLines(v verse, paneW int, marker string) []string {
+// width paneW, with an inline verse number and word-wrapped text.
+func renderVerseLines(v verse, paneW int) []string {
 	textW := paneW - leftMargin - numCols - 1
 	if textW < 10 {
 		textW = 10
 	}
-	if marker == "" {
-		marker = " "
-	}
-	num := verseNumSt.Render(fmt.Sprintf("%3d", v.num)) + marker
+	num := verseNumSt.Render(fmt.Sprintf("%3d ", v.num))
 	cont := strings.Repeat(" ", leftMargin+numCols)
 	wrapped := wordWrap(v.text, textW)
 	var lines []string
@@ -206,14 +202,16 @@ func buildContent(c ref, translations []string, store *AnnotationStore, active m
 		}
 	}
 
-	// Allocate widths: translation panes + optional annotation pane.
+	// Allocate widths: translation panes + a slim always-present marker
+	// gutter (breadcrumbs live here now, not inline with the verse
+	// number) + the optional wide annotation pane.
 	aw := 0
-	divCount := n - 1
+	divCount := n // n-1 between panes + 1 before the marker gutter
 	if hasAnnCol {
 		aw = clamp(totalW/4, 20, 40)
-		divCount = n // divider between last translation and annotation column
+		divCount = n + 1 // + 1 more before the annotation column
 	}
-	avail := totalW - divCount - aw
+	avail := totalW - divCount - aw - markerColW
 	pw := avail / n
 	if pw < 20 {
 		pw = 20
@@ -222,6 +220,7 @@ func buildContent(c ref, translations []string, store *AnnotationStore, active m
 	div := divSt.Render("│")
 	blank := strings.Repeat(" ", pw)
 	blankAnn := strings.Repeat(" ", aw)
+	blankMarker := strings.Repeat(" ", markerColW)
 
 	// Header rows: blank, translation labels, separator, blank.
 	labelParts := make([]string, n)
@@ -230,7 +229,9 @@ func buildContent(c ref, translations []string, store *AnnotationStore, active m
 		labelParts[i] = padToWidth(labelSt.Render(centerPad(strings.ToUpper(t), pw)), pw)
 		sepParts[i] = divSt.Render(strings.Repeat("─", pw))
 	}
-	blankRow := strings.Join(repN(blank, n), div)
+	labelParts = append(labelParts, padToWidth("", markerColW))
+	sepParts = append(sepParts, divSt.Render(strings.Repeat("─", markerColW)))
+	blankRow := strings.Join(repN(blank, n), div) + div + blankMarker
 	if hasAnnCol {
 		activeNames := []string{}
 		for _, name := range sortedGroupNames(store) {
@@ -298,7 +299,7 @@ func buildContent(c ref, translations []string, store *AnnotationStore, active m
 		maxH := 0
 		for pi := range translations {
 			if vi < len(allVerses[pi]) {
-				paneLines[pi] = renderVerseLines(allVerses[pi][vi], pw, marker)
+				paneLines[pi] = renderVerseLines(allVerses[pi][vi], pw)
 			}
 			if len(paneLines[pi]) > maxH {
 				maxH = len(paneLines[pi])
@@ -336,14 +337,19 @@ func buildContent(c ref, translations []string, store *AnnotationStore, active m
 		}
 
 		for li := 0; li < maxH; li++ {
-			parts := make([]string, n)
+			parts := make([]string, 0, n+2)
 			for pi := range translations {
 				var s string
 				if li < len(paneLines[pi]) {
 					s = paneLines[pi][li]
 				}
-				parts[pi] = padToWidth(s, pw)
+				parts = append(parts, padToWidth(s, pw))
 			}
+			markerCell := " "
+			if li == 0 && marker != "" {
+				markerCell = marker
+			}
+			parts = append(parts, padToWidth(markerCell, markerColW))
 			if hasAnnCol {
 				var s string
 				if li < len(annLines) {

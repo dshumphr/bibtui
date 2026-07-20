@@ -88,8 +88,7 @@ type model struct {
 	pendingQID     string // id of the user.message currently awaiting an answer
 	thinking       bool
 	lastAnswer     string
-	groupsClosed   bool            // true after A collapses the panel
-	savedGroups    map[string]bool // exact active set to restore on A again
+	savedGroups    map[string]bool // exact active set to restore when every group is hidden
 }
 
 // withMode switches the app mode and triggers a content rebuild when entering
@@ -130,6 +129,14 @@ func (m model) applySession(s *Session) model {
 		for k, v := range s.ActiveGroups {
 			m.activeGroups[k] = v
 		}
+	}
+	if s.SavedGroups != nil {
+		m.savedGroups = make(map[string]bool, len(s.SavedGroups))
+		for k, v := range s.SavedGroups {
+			m.savedGroups[k] = v
+		}
+	} else {
+		m.savedGroups = nil
 	}
 	return m
 }
@@ -216,6 +223,23 @@ func (m model) withScrollClamped() model {
 	return m
 }
 
+// withContentAnchored rebuilds lines and verseMap while preserving which
+// verse is at the top of the viewport. Without this, toggling the
+// annotation column (or any layout-changing action) shifts the scroll
+// because verses gain/lose height from annotation lines — capturing the
+// top verse before the rebuild and re-zeroing scroll to its new position
+// prevents the "jump" on every A-toggle, group toggle, and note entry.
+func (m model) withContentAnchored() model {
+	anchor := m.activeRef()
+	m = m.withContent()
+	if anchor.Verse > 0 && m.verseMap != nil {
+		if off, ok := m.verseMap[anchor.Verse]; ok {
+			m.scroll = off
+		}
+	}
+	return m.withScrollClamped()
+}
+
 func (m model) withToggled(t string) model {
 	if m.isActive(t) {
 		if len(m.translations) <= 1 {
@@ -243,29 +267,33 @@ func (m model) withGroupsToggled() model {
 	if m.store == nil || len(sortedGroupNames(m.store)) == 0 {
 		return m
 	}
-	if m.groupsClosed {
-		if m.savedGroups != nil {
-			m.activeGroups = m.savedGroups
+
+	anyActive := false
+	for _, active := range m.activeGroups {
+		if active {
+			anyActive = true
+			break
 		}
-		m.savedGroups = nil
-		m.groupsClosed = false
-	} else {
+	}
+
+	if anyActive {
+		// Collapse whatever is showing now and remember that exact set.
 		saved := make(map[string]bool, len(m.activeGroups))
-		anyActive := false
-		for k, v := range m.activeGroups {
-			saved[k] = v
-			anyActive = anyActive || v
-		}
-		if !anyActive {
-			return m // nothing showing to collapse
+		for name, active := range m.activeGroups {
+			saved[name] = active
+			m.activeGroups[name] = false
 		}
 		m.savedGroups = saved
-		for k := range m.activeGroups {
-			m.activeGroups[k] = false
+	} else {
+		// All groups are hidden: restore the last collapsed set.
+		if m.savedGroups == nil {
+			return m
 		}
-		m.groupsClosed = true
+		m.activeGroups = m.savedGroups
+		m.savedGroups = nil
 	}
-	m = m.withContent().withScrollClamped()
+
+	m = m.withContentAnchored()
 	m.emit("annotation.groups_changed", map[string]any{"active": m.activeGroups})
 	return m
 }
@@ -486,7 +514,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case " ", "enter":
 				if m.pickerIdx < len(m.allTrans) {
 					m = m.withToggled(m.allTrans[m.pickerIdx])
-					m = m.withContent().withScrollClamped()
+					m = m.withContentAnchored()
 					m.emit("read.translations", map[string]any{"translations": m.translations})
 				}
 			}
@@ -511,9 +539,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.groupPickerIdx < len(names) {
 					name := names[m.groupPickerIdx]
 					m.activeGroups[name] = !m.activeGroups[name]
-					m.groupsClosed = false // manual picker edit supersedes any pending A-restore
-					m.savedGroups = nil
-					m = m.withContent().withScrollClamped()
+					m = m.withContentAnchored()
 					m.emit("annotation.groups_changed", map[string]any{"active": m.activeGroups})
 				}
 			}
@@ -993,6 +1019,9 @@ func (m model) updateOuterNote(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m = m.withContent()
 			m = m.ensureCursorVisible()
 		}
+		return m, nil
+	case "A":
+		m = m.withGroupsToggled()
 		return m, nil
 	case "g":
 		m.noteCursorVerse = verses[0]

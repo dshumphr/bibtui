@@ -14,6 +14,7 @@ type Session struct {
 	Scroll       int             `json:"scroll"`
 	Translations []string        `json:"translations"`
 	ActiveGroups map[string]bool `json:"active_groups"`
+	SavedGroups  map[string]bool `json:"saved_groups,omitempty"`
 	SavedAt      time.Time       `json:"saved_at"`
 }
 
@@ -26,12 +27,20 @@ func saveSession(m model) {
 	for k, v := range m.activeGroups {
 		activeGroups[k] = v
 	}
+	var savedGroups map[string]bool
+	if m.savedGroups != nil {
+		savedGroups = make(map[string]bool, len(m.savedGroups))
+		for k, v := range m.savedGroups {
+			savedGroups[k] = v
+		}
+	}
 	s := Session{
 		BookSlug:     r.book.slug,
 		Chapter:      r.num,
 		Scroll:       m.scroll,
 		Translations: m.translations,
 		ActiveGroups: activeGroups,
+		SavedGroups:  savedGroups,
 		SavedAt:      time.Now(),
 	}
 	data, err := json.MarshalIndent(s, "", "  ")
