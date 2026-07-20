@@ -49,7 +49,8 @@ Low-frequency, semantic — never per-scroll-line, per the cost model
 | `app.started` | process start | `{translations, resumed}` | once |
 | `read.location` | chapter change: `]`/`[`, resolved `:goto`, `n` (new session), session resume | `{translations, book, chapter, ref}` | discrete already, no debounce needed |
 | `read.translations` | `o` picker toggles the active pane set | `{translations}` | |
-| `annotation.groups_changed` | `a` picker toggles a group | `{active}` | |
+| `annotation.groups_changed` | `a` picker changes selected annotation groups | `{active}` | durable preferences; selection survives panel hide/show |
+| `annotation.panel_changed` | `A` hides or shows the annotation panel | `{open}` | visibility only; never changes selected groups |
 | `note.created` / `note.updated` / `note.deleted` | inner note UI save/delete, **by either author** | `{id, author, book, chapter, verse, text}` (update/delete omit ref) | user actions surfaced to the agent too — "almost any human action AI-visible" cuts both ways |
 | `user.message` | new `?` ask-prompt, Enter | `{text, book, chapter, verse, ref}` | canonical single type for questions *and* imperatives, current position always attached so the agent never has to cross-reference a separate `read.location` |
 | `action.rejected` | an inbound accepts-event bibtui couldn't/wouldn't apply | `{action, id?, reason}` | ack/nack loop — silent failure is worse than a loud one |
@@ -78,7 +79,8 @@ any human action should be AI-accessible."
 | `nav.goto` | `{book, chapter, verse?}` | `:` goto + Enter | `book` may be canonical slug or exact/prefix display name, resolved via the existing `bookCandidates`/`findIndexPos`; ambiguous or unmatched → `action.rejected`, never a silent no-op |
 | `nav.step` | `{direction: "next"\|"prev"}` | `]` / `[` | no-op (not rejected) at the first/last chapter |
 | `translations.set` | `{translations: [...]}` | `o` picker, toggle-by-toggle | **absolute set**, not toggle emulation — one round trip, idempotent by construction; unknown codes dropped, always clamps to ≥1 |
-| `groups.set` | `{active: {name: bool, ...}}` | `a` picker | merge semantics: only listed keys change, others keep their current state |
+| `groups.set` | `{active: {name: bool, ...}}` | `a` picker | merge selected-group preferences: only listed keys change; panel visibility is untouched |
+| `panel.set` | `{open: true\|false}` | `A` hide/show | absolute panel visibility; selected groups are untouched |
 | `note.create` | `{id, book, chapter, verse, text}` | inner note UI, `+ new note` → save | caller-chosen stable id; resend same id → overwrite (idempotent per proxenos convention) |
 | `note.update` | `{id, text}` | inner note UI, edit → save | only on notes this `src` authored |
 | `note.delete` | `{id}` | inner note UI, `d` → `y` | only on notes this `src` authored — see Safety below |

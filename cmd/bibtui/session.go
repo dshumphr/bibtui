@@ -9,13 +9,14 @@ import (
 const defaultSessionPath = "session.json"
 
 type Session struct {
-	BookSlug     string          `json:"book"`
-	Chapter      int             `json:"chapter"`
-	Scroll       int             `json:"scroll"`
-	Translations []string        `json:"translations"`
-	ActiveGroups map[string]bool `json:"active_groups"`
-	SavedGroups  map[string]bool `json:"saved_groups,omitempty"`
-	SavedAt      time.Time       `json:"saved_at"`
+	BookSlug            string          `json:"book"`
+	Chapter             int             `json:"chapter"`
+	Scroll              int             `json:"scroll"`
+	Translations        []string        `json:"translations"`
+	ActiveGroups        map[string]bool `json:"active_groups"`
+	AnnotationPanelOpen *bool           `json:"annotation_panel_open,omitempty"`
+	SavedGroups         map[string]bool `json:"saved_groups,omitempty"` // legacy read-only migration
+	SavedAt             time.Time       `json:"saved_at"`
 }
 
 func saveSession(m model) {
@@ -27,21 +28,15 @@ func saveSession(m model) {
 	for k, v := range m.activeGroups {
 		activeGroups[k] = v
 	}
-	var savedGroups map[string]bool
-	if m.savedGroups != nil {
-		savedGroups = make(map[string]bool, len(m.savedGroups))
-		for k, v := range m.savedGroups {
-			savedGroups[k] = v
-		}
-	}
+	panelOpen := m.annotationPanelOpen
 	s := Session{
-		BookSlug:     r.book.slug,
-		Chapter:      r.num,
-		Scroll:       m.scroll,
-		Translations: m.translations,
-		ActiveGroups: activeGroups,
-		SavedGroups:  savedGroups,
-		SavedAt:      time.Now(),
+		BookSlug:            r.book.slug,
+		Chapter:             r.num,
+		Scroll:              m.scroll,
+		Translations:        m.translations,
+		ActiveGroups:        activeGroups,
+		AnnotationPanelOpen: &panelOpen,
+		SavedAt:             time.Now(),
 	}
 	data, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {

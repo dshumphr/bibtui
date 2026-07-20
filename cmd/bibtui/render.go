@@ -169,36 +169,37 @@ func renderAnnotations(store *AnnotationStore, active map[string]bool, ref Annot
 // column is reserved so that annotations can be shown aligned with the verses
 // they annotate.  The returned map records the starting line offset for each
 // verse number (used for verse-level scrolling).
-func buildContent(c ref, translations []string, store *AnnotationStore, active map[string]bool, totalW int, cursorVerse int, noteMode bool) ([]string, map[int]int) {
+func buildContent(c ref, translations []string, store *AnnotationStore, active map[string]bool, panelOpen bool, totalW int, cursorVerse int, noteMode bool) ([]string, map[int]int) {
 	n := len(translations)
 	if n == 0 {
 		return nil, nil
 	}
 
-	// Decide whether we need an annotation column.
-	hasAnnCol := false
+	// Group selection is a durable preference; panel visibility is an
+	// independent transient choice. The wide column appears only when the
+	// panel is open and at least one selected group has content enabled.
+	hasSelectedGroup := false
 	if store != nil {
-		for _, on := range active {
-			if on {
-				hasAnnCol = true
+		for _, selected := range active {
+			if selected {
+				hasSelectedGroup = true
 				break
 			}
 		}
 	}
+	hasAnnCol := panelOpen && hasSelectedGroup
 	if noteMode {
 		hasAnnCol = true
 	}
 
-	// Groups whose annotations aren't already visible in the side column
-	// — every group if the column is closed, only the inactive ones if
-	// it's open — computed once and reused per verse by breadcrumbMarker.
-	hiddenGroups := map[string]bool{}
-	if store != nil {
-		for name := range store.Groups {
-			if hasAnnCol && active[name] {
-				continue
+	// Breadcrumbs preview only selected groups, and only while those groups'
+	// panel is hidden. Deselected groups are intentionally silent.
+	breadcrumbGroups := map[string]bool{}
+	if store != nil && !hasAnnCol {
+		for name, selected := range active {
+			if selected {
+				breadcrumbGroups[name] = true
 			}
-			hiddenGroups[name] = true
 		}
 	}
 
@@ -292,7 +293,7 @@ func buildContent(c ref, translations []string, store *AnnotationStore, active m
 		marker := ""
 		if vnum > 0 {
 			annRef = AnnotationRef{Book: c.book.slug, Chapter: c.num, Verse: vnum}
-			marker = breadcrumbMarker(store, hiddenGroups, annRef)
+			marker = breadcrumbMarker(store, breadcrumbGroups, annRef)
 		}
 
 		paneLines := make([][]string, n)

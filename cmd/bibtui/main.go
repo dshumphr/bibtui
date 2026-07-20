@@ -84,11 +84,11 @@ type model struct {
 	askOpen    bool
 	askInput   string
 
-	proxStreamPath string // resolved absolute path to the stream file (honors proxenos config overrides)
-	pendingQID     string // id of the user.message currently awaiting an answer
-	thinking       bool
-	lastAnswer     string
-	savedGroups    map[string]bool // exact active set to restore when every group is hidden
+	proxStreamPath      string // resolved absolute path to the stream file (honors proxenos config overrides)
+	pendingQID          string // id of the user.message currently awaiting an answer
+	thinking            bool
+	lastAnswer          string
+	annotationPanelOpen bool // A toggles only this; activeGroups remain durable preferences
 }
 
 // withMode switches the app mode and triggers a content rebuild when entering
@@ -130,13 +130,17 @@ func (m model) applySession(s *Session) model {
 			m.activeGroups[k] = v
 		}
 	}
-	if s.SavedGroups != nil {
-		m.savedGroups = make(map[string]bool, len(s.SavedGroups))
+	if s.AnnotationPanelOpen != nil {
+		m.annotationPanelOpen = *s.AnnotationPanelOpen
+	} else if s.SavedGroups != nil {
+		// Migration from the short-lived collapsed-state format: old
+		// sessions stored all-false active_groups plus the real preference
+		// set in saved_groups.
+		m.activeGroups = make(map[string]bool, len(s.SavedGroups))
 		for k, v := range s.SavedGroups {
-			m.savedGroups[k] = v
+			m.activeGroups[k] = v
 		}
-	} else {
-		m.savedGroups = nil
+		m.annotationPanelOpen = false
 	}
 	return m
 }
@@ -150,12 +154,13 @@ func initial(translations []string, store *AnnotationStore, stats *Stats) model 
 		}
 	}
 	return model{
-		index:        buildIndex(translations[0]),
-		translations: translations,
-		allTrans:     allTrans,
-		store:        store,
-		stats:        stats,
-		activeGroups: activeGroups,
+		index:               buildIndex(translations[0]),
+		translations:        translations,
+		allTrans:            allTrans,
+		store:               store,
+		stats:               stats,
+		activeGroups:        activeGroups,
+		annotationPanelOpen: true,
 	}
 }
 
@@ -209,7 +214,7 @@ func (m model) withContent() model {
 	if m.noteUI != noteUIOff {
 		cursor = m.noteCursorVerse
 	}
-	m.lines, m.verseMap = buildContent(m.index[m.pos], m.translations, m.store, m.activeGroups, m.width, cursor, m.noteUI != noteUIOff)
+	m.lines, m.verseMap = buildContent(m.index[m.pos], m.translations, m.store, m.activeGroups, m.annotationPanelOpen, m.width, cursor, m.noteUI != noteUIOff)
 	return m
 }
 
@@ -259,42 +264,17 @@ func (m model) withToggled(t string) model {
 	return m
 }
 
-// withGroupsToggled is the single-key complement to the `a` group picker:
-// collapse every active group at once for focused reading (remembering
-// exactly which ones were on), or restore that exact set — never "turn
-// everything on," always your actual prior selection.
-func (m model) withGroupsToggled() model {
+// withPanelToggled hides or shows the annotation panel without changing
+// which groups the user has selected. Group preferences survive any number
+// of A toggles; breadcrumbs use those same preferences while the panel is
+// hidden.
+func (m model) withPanelToggled() model {
 	if m.store == nil || len(sortedGroupNames(m.store)) == 0 {
 		return m
 	}
-
-	anyActive := false
-	for _, active := range m.activeGroups {
-		if active {
-			anyActive = true
-			break
-		}
-	}
-
-	if anyActive {
-		// Collapse whatever is showing now and remember that exact set.
-		saved := make(map[string]bool, len(m.activeGroups))
-		for name, active := range m.activeGroups {
-			saved[name] = active
-			m.activeGroups[name] = false
-		}
-		m.savedGroups = saved
-	} else {
-		// All groups are hidden: restore the last collapsed set.
-		if m.savedGroups == nil {
-			return m
-		}
-		m.activeGroups = m.savedGroups
-		m.savedGroups = nil
-	}
-
+	m.annotationPanelOpen = !m.annotationPanelOpen
 	m = m.withContentAnchored()
-	m.emit("annotation.groups_changed", map[string]any{"active": m.activeGroups})
+	m.emit("annotation.panel_changed", map[string]any{"open": m.annotationPanelOpen})
 	return m
 }
 
@@ -592,7 +572,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.groupPickerIdx = 0
 			}
 		case "A":
-			m = m.withGroupsToggled()
+			m = m.withPanelToggled()
 		case "?":
 			if m.proxStream != "" {
 				m.askOpen = true
@@ -626,6 +606,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return newModel, nil
+
+	case proxPanelSetMsg:
+		return m.applyPanelSet(msg), nil
 
 	case proxNoteCreateMsg:
 		newModel, ok, reason := m.applyNoteCreate(msg)
@@ -1021,7 +1004,7 @@ func (m model) updateOuterNote(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "A":
-		m = m.withGroupsToggled()
+		m = m.withPanelToggled()
 		return m, nil
 	case "g":
 		m.noteCursorVerse = verses[0]

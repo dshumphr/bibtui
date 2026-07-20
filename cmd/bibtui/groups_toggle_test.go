@@ -9,85 +9,97 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-func groupsToggleTestModel() model {
+func panelTestModel() model {
 	store := NewAnnotationStore("")
 	store.Groups = map[string]*AnnotationGroup{
 		"crossrefs": {Name: "crossrefs"},
 		"notes":     {Name: "notes"},
 	}
 	return model{
-		mode:         modeReader,
-		index:        []ref{{book: book{slug: "genesis", name: "Genesis"}, num: 1}},
-		translations: []string{"kjv"},
-		allTrans:     []string{"kjv"},
-		store:        store,
-		activeGroups: map[string]bool{"crossrefs": false, "notes": true},
+		mode:                modeReader,
+		index:               []ref{{book: book{slug: "genesis", name: "Genesis"}, num: 1}},
+		translations:        []string{"kjv"},
+		allTrans:            []string{"kjv"},
+		store:               store,
+		activeGroups:        map[string]bool{"crossrefs": false, "notes": true},
+		annotationPanelOpen: true,
 	}
 }
 
-func TestGroupsToggleRepeatedCycles(t *testing.T) {
-	m := groupsToggleTestModel()
-
-	m = m.withGroupsToggled() // collapse
-	if m.activeGroups["notes"] || m.activeGroups["crossrefs"] {
-		t.Fatalf("collapse left a group active: %#v", m.activeGroups)
-	}
-
-	m = m.withGroupsToggled() // restore
+func assertGroupPreferences(t *testing.T, m model) {
+	t.Helper()
 	if !m.activeGroups["notes"] || m.activeGroups["crossrefs"] {
-		t.Fatalf("restore did not recover the exact prior set: %#v", m.activeGroups)
-	}
-	if m.savedGroups != nil {
-		t.Fatalf("restore left stale saved groups: %#v", m.savedGroups)
-	}
-
-	m = m.withGroupsToggled() // collapse again — the old groupsClosed bug died here
-	m = m.withGroupsToggled() // restore again
-	if !m.activeGroups["notes"] || m.activeGroups["crossrefs"] {
-		t.Fatalf("second toggle cycle did not restore the exact prior set: %#v", m.activeGroups)
+		t.Fatalf("group preferences changed: %#v", m.activeGroups)
 	}
 }
 
-func TestCollapsedGroupsSurviveSessionResume(t *testing.T) {
+func TestPanelTogglePreservesPreferencesRepeatedly(t *testing.T) {
+	m := panelTestModel()
+	for cycle := range 3 {
+		m = m.withPanelToggled()
+		if m.annotationPanelOpen {
+			t.Fatalf("cycle %d: panel did not hide", cycle)
+		}
+		assertGroupPreferences(t, m)
+
+		m = m.withPanelToggled()
+		if !m.annotationPanelOpen {
+			t.Fatalf("cycle %d: panel did not reopen", cycle)
+		}
+		assertGroupPreferences(t, m)
+	}
+}
+
+func TestPanelVisibilitySurvivesSessionResume(t *testing.T) {
 	t.Chdir(t.TempDir())
-
-	collapsed := groupsToggleTestModel()
-	collapsed.activeGroups = map[string]bool{"crossrefs": false, "notes": false}
-	collapsed.savedGroups = map[string]bool{"crossrefs": false, "notes": true}
-	saveSession(collapsed)
+	hidden := panelTestModel()
+	hidden.annotationPanelOpen = false
+	saveSession(hidden)
 
 	session := loadSession()
-	if session == nil {
-		t.Fatal("saved session did not reload")
+	if session == nil || session.AnnotationPanelOpen == nil || *session.AnnotationPanelOpen {
+		t.Fatalf("saved session lost hidden-panel state: %#v", session)
 	}
-	if !session.SavedGroups["notes"] {
-		t.Fatalf("saved session lost collapsed-panel restore state: %#v", session.SavedGroups)
+	resumed := panelTestModel().applySession(session)
+	if resumed.annotationPanelOpen {
+		t.Fatal("resumed session reopened a hidden panel")
 	}
+	assertGroupPreferences(t, resumed)
 
-	resumed := groupsToggleTestModel().applySession(session)
-	resumed = resumed.withGroupsToggled()
-	if !resumed.activeGroups["notes"] || resumed.activeGroups["crossrefs"] {
-		t.Fatalf("A after resume did not restore the pre-collapse set: %#v", resumed.activeGroups)
+	resumed = resumed.withPanelToggled()
+	if !resumed.annotationPanelOpen {
+		t.Fatal("A did not reopen the resumed hidden panel")
 	}
+	assertGroupPreferences(t, resumed)
 }
 
-func TestGroupsToggleWorksInOuterNoteMode(t *testing.T) {
-	m := groupsToggleTestModel()
+func TestLegacyCollapsedSessionMigratesPreferences(t *testing.T) {
+	legacy := &Session{
+		ActiveGroups: map[string]bool{"crossrefs": false, "notes": false},
+		SavedGroups:  map[string]bool{"crossrefs": false, "notes": true},
+	}
+	m := panelTestModel().applySession(legacy)
+	if m.annotationPanelOpen {
+		t.Fatal("legacy collapsed session did not migrate to a hidden panel")
+	}
+	assertGroupPreferences(t, m)
+}
+
+func TestPanelToggleWorksInOuterNoteMode(t *testing.T) {
+	m := panelTestModel()
 	m.noteUI = noteUIOuter
 	m.noteCursorVerse = 1
 	m.verseMap = map[int]int{1: 0}
 
 	updated, _ := m.updateOuterNote(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'A'}})
 	got := updated.(model)
-	if got.activeGroups["notes"] || got.activeGroups["crossrefs"] {
-		t.Fatalf("A in outer note mode did not collapse groups: %#v", got.activeGroups)
+	if got.annotationPanelOpen {
+		t.Fatal("A in outer note mode did not hide the panel")
 	}
-	if !got.savedGroups["notes"] {
-		t.Fatalf("A in outer note mode did not remember the active set: %#v", got.savedGroups)
-	}
+	assertGroupPreferences(t, got)
 }
 
-func TestPanelTogglePreservesTopVerseAndUsesRightGutter(t *testing.T) {
+func TestPanelTogglePreservesTopVerseAndUsesPreferredGroupBreadcrumbs(t *testing.T) {
 	t.Chdir(t.TempDir())
 	chapterDir := filepath.Join("bibles", "kjv", "genesis")
 	if err := os.MkdirAll(chapterDir, 0755); err != nil {
@@ -112,33 +124,51 @@ func TestPanelTogglePreservesTopVerseAndUsesRightGutter(t *testing.T) {
 		},
 	}
 	m := model{
-		mode:         modeReader,
-		ready:        true,
-		width:        80,
-		height:       4,
-		index:        []ref{{book: book{slug: "genesis", name: "Genesis"}, num: 1}},
-		translations: []string{"kjv"},
-		store:        store,
-		activeGroups: map[string]bool{"notes": true},
+		mode:                modeReader,
+		ready:               true,
+		width:               80,
+		height:              4,
+		index:               []ref{{book: book{slug: "genesis", name: "Genesis"}, num: 1}},
+		translations:        []string{"kjv"},
+		store:               store,
+		activeGroups:        map[string]bool{"notes": true},
+		annotationPanelOpen: true,
 	}
 	m = m.withContent()
 	openVerse2Offset := m.verseMap[2]
 	m.scroll = openVerse2Offset
 
-	m = m.withGroupsToggled() // close the tall annotation column
+	m = m.withPanelToggled()
 	if got := m.activeRef().Verse; got != 2 {
-		t.Fatalf("collapse moved the top verse: got %d, want 2", got)
+		t.Fatalf("hide moved the top verse: got %d, want 2", got)
 	}
 	if m.verseMap[2] == openVerse2Offset {
 		t.Fatal("test setup did not change verse height across the toggle")
 	}
 	verse1Line := m.lines[m.verseMap[1]]
 	if !strings.HasSuffix(verse1Line, "│•") {
-		t.Fatalf("breadcrumb is not in the far-right gutter: %q", verse1Line)
+		t.Fatalf("selected-group breadcrumb is not in the far-right gutter: %q", verse1Line)
 	}
 
-	m = m.withGroupsToggled() // restore the column
-	if got := m.activeRef().Verse; got != 2 {
-		t.Fatalf("restore moved the top verse: got %d, want 2", got)
+	m.activeGroups["notes"] = false
+	m = m.withContentAnchored()
+	if strings.Contains(m.lines[m.verseMap[1]], "•") {
+		t.Fatal("deselected group still produced a breadcrumb")
 	}
+
+	m.activeGroups["notes"] = true
+	m = m.withContentAnchored()
+	m = m.withPanelToggled()
+	if got := m.activeRef().Verse; got != 2 {
+		t.Fatalf("show moved the top verse: got %d, want 2", got)
+	}
+	assertGroupPreferences(t, m)
+}
+
+func TestPanelSetDoesNotChangeGroupPreferences(t *testing.T) {
+	m := panelTestModel().applyPanelSet(proxPanelSetMsg{Open: false})
+	if m.annotationPanelOpen {
+		t.Fatal("panel.set false did not hide panel")
+	}
+	assertGroupPreferences(t, m)
 }

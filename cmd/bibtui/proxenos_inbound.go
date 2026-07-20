@@ -254,6 +254,8 @@ type proxTranslationsSetMsg struct{ Translations []string }
 
 type proxGroupsSetMsg struct{ Active map[string]bool }
 
+type proxPanelSetMsg struct{ Open bool }
+
 type proxNoteCreateMsg struct {
 	ID     string
 	Author string
@@ -323,6 +325,15 @@ func decodeProxAction(r proxEvent) (tea.Msg, string) {
 			return nil, "malformed body"
 		}
 		return proxGroupsSetMsg{Active: body.Active}, ""
+
+	case "panel.set":
+		var body struct {
+			Open *bool `json:"open"`
+		}
+		if err := json.Unmarshal(r.Body, &body); err != nil || body.Open == nil {
+			return nil, "malformed body"
+		}
+		return proxPanelSetMsg{Open: *body.Open}, ""
 
 	case "note.create":
 		var body struct {
@@ -463,6 +474,17 @@ func (m model) applyGroupsSet(msg proxGroupsSetMsg) (model, bool, string) {
 	m = m.withContentAnchored()
 	m.emit("annotation.groups_changed", map[string]any{"active": m.activeGroups})
 	return m, true, ""
+}
+
+// applyPanelSet sets visibility absolutely without mutating group selection.
+func (m model) applyPanelSet(msg proxPanelSetMsg) model {
+	if m.annotationPanelOpen == msg.Open {
+		return m
+	}
+	m.annotationPanelOpen = msg.Open
+	m = m.withContentAnchored()
+	m.emit("annotation.panel_changed", map[string]any{"open": m.annotationPanelOpen})
+	return m
 }
 
 // applyNoteCreate, applyNoteUpdate, and applyNoteDelete are the id-
