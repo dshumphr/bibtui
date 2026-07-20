@@ -1,7 +1,10 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -28,10 +31,23 @@ func (r AnnotationRef) Equal(o AnnotationRef) bool {
 
 // Intensity is an optional 1-3 scale.  1= subtle, 2= moderate, 3= strong.
 type Annotation struct {
+	ID        string        `json:"id,omitempty"`     // stable; empty on annotations predating proxenos integration
+	Author    string        `json:"author,omitempty"` // "user", or an agent's src (e.g. "agent:main")
 	Ref       AnnotationRef `json:"ref"`
 	Text      string        `json:"text"`
 	Intensity *int          `json:"intensity,omitempty"`
 	CreatedAt time.Time     `json:"created_at"`
+}
+
+// newAnnotationID returns a short, stable, opaque identifier — not a
+// proxenos ULID (that's the event id, a different namespace), just
+// enough entropy to be collision-free for one user's annotation store.
+func newAnnotationID() string {
+	var b [10]byte
+	if _, err := rand.Read(b[:]); err == nil {
+		return "n" + hex.EncodeToString(b[:])
+	}
+	return fmt.Sprintf("n%d", time.Now().UnixNano())
 }
 
 // ── annotation group ──────────────────────────────────────────────────────
@@ -69,7 +85,9 @@ func NewAnnotationStore(path string) *AnnotationStore {
 
 func (s *AnnotationStore) Load() error {
 	data, err := os.ReadFile(s.path)
+	usingExample := false
 	if os.IsNotExist(err) {
+		usingExample = true
 		data, err = os.ReadFile(exampleStorePath)
 		if os.IsNotExist(err) {
 			return nil
@@ -80,7 +98,38 @@ func (s *AnnotationStore) Load() error {
 	} else if err != nil {
 		return err
 	}
-	return json.Unmarshal(data, s)
+	if err := json.Unmarshal(data, s); err != nil {
+		return err
+	}
+	// Schema migration: annotations written before the proxenos
+	// integration have no id/author. Backfill in memory always; persist
+	// only when we loaded the user's real store — the example fallback
+	// is transient by design and must not get silently materialized into
+	// a real annotations.json.
+	if s.backfillIdentity() && !usingExample {
+		return s.Save()
+	}
+	return nil
+}
+
+// backfillIdentity assigns a stable id and a default "user" author to any
+// annotation that predates those fields. Returns true if anything changed.
+func (s *AnnotationStore) backfillIdentity() bool {
+	changed := false
+	for _, g := range s.Groups {
+		for i := range g.Annotations {
+			a := &g.Annotations[i]
+			if a.ID == "" {
+				a.ID = newAnnotationID()
+				changed = true
+			}
+			if a.Author == "" {
+				a.Author = "user"
+				changed = true
+			}
+		}
+	}
+	return changed
 }
 
 func (s *AnnotationStore) Save() error {
@@ -224,14 +273,19 @@ func (s *AnnotationStore) NotesAtRef(ref AnnotationRef) []Annotation {
 	return out
 }
 
-// AddNote creates a new note in the "notes" group.
-func (s *AnnotationStore) AddNote(ref AnnotationRef, text string) {
+// AddNote creates a new note in the "notes" group, authored by the local
+// user. Returns the created annotation so the caller can learn its id.
+func (s *AnnotationStore) AddNote(ref AnnotationRef, text string) Annotation {
 	s.EnsureNotesGroup()
-	s.Add(notesGroupName, Annotation{
+	a := Annotation{
+		ID:        newAnnotationID(),
+		Author:    "user",
 		Ref:       ref,
 		Text:      text,
 		CreatedAt: time.Now(),
-	})
+	}
+	s.Add(notesGroupName, a)
+	return a
 }
 
 // UpdateNote updates the note at the given index (among notes matching ref).
@@ -269,6 +323,85 @@ func (s *AnnotationStore) DeleteNoteAt(ref AnnotationRef, idx int) {
 	}
 	pos := positions[idx]
 	g.Annotations = append(g.Annotations[:pos], g.Annotations[pos+1:]...)
+}
+
+// ── id-addressed notes (proxenos accepts path) ──────────────────────────
+//
+// The keyboard note UI addresses notes positionally (ref + index into the
+// verse's slice) because that's what a human paging through a list needs.
+// An inbound stream command addresses a specific note by its stable id
+// instead, and must never touch a note it doesn't own — these three
+// methods are the only place that authorship guard lives.
+
+// ErrNoteNotFound means no annotation with the given id exists.
+var ErrNoteNotFound = errors.New("no such note")
+
+// ErrNotAuthor means the id exists but belongs to a different author —
+// the guard that keeps one src from editing or deleting another's note.
+var ErrNotAuthor = errors.New("not authored by this caller")
+
+// FindNoteByID searches every group for the given id (notes always live
+// in "notes", but nothing else in the schema assumes that).
+func (s *AnnotationStore) FindNoteByID(id string) (*Annotation, string, bool) {
+	for name, g := range s.Groups {
+		for i := range g.Annotations {
+			if g.Annotations[i].ID == id {
+				return &g.Annotations[i], name, true
+			}
+		}
+	}
+	return nil, "", false
+}
+
+// AddNoteWithID creates a note with a caller-chosen stable id in the
+// "notes" group. Per the proxenos idempotency convention, resending the
+// same id overwrites — but only if the resend comes from the same
+// author; a different author reusing an existing id is rejected rather
+// than silently hijacking it.
+func (s *AnnotationStore) AddNoteWithID(ref AnnotationRef, id, author, text string) error {
+	if existing, _, ok := s.FindNoteByID(id); ok {
+		if existing.Author != author {
+			return ErrNotAuthor
+		}
+		existing.Ref = ref
+		existing.Text = text
+		return nil
+	}
+	s.EnsureNotesGroup()
+	s.Add(notesGroupName, Annotation{ID: id, Author: author, Ref: ref, Text: text})
+	return nil
+}
+
+// UpdateNoteByID edits an existing note's text — only if author matches.
+func (s *AnnotationStore) UpdateNoteByID(id, author, text string) error {
+	a, _, ok := s.FindNoteByID(id)
+	if !ok {
+		return ErrNoteNotFound
+	}
+	if a.Author != author {
+		return ErrNotAuthor
+	}
+	a.Text = text
+	return nil
+}
+
+// DeleteNoteByID removes an existing note — only if author matches.
+func (s *AnnotationStore) DeleteNoteByID(id, author string) error {
+	a, group, ok := s.FindNoteByID(id)
+	if !ok {
+		return ErrNoteNotFound
+	}
+	if a.Author != author {
+		return ErrNotAuthor
+	}
+	g := s.Groups[group]
+	for i := range g.Annotations {
+		if g.Annotations[i].ID == id {
+			g.Annotations = append(g.Annotations[:i], g.Annotations[i+1:]...)
+			break
+		}
+	}
+	return nil
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────

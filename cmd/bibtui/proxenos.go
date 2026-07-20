@@ -46,41 +46,71 @@ func parseArgs(args []string) (proxStream string, rest []string) {
 // Any failure disables the feature for this run rather than blocking the
 // user from reading — middleware trouble is never a reason to not read a
 // Bible.
-func bootstrapProxenos(stream string) bool {
+func bootstrapProxenos(stream string) (path string, ok bool) {
 	if stream == "" {
-		return false
+		return "", false
 	}
 	if _, err := exec.LookPath("proxenos"); err != nil {
 		proxLogf("proxenos not on PATH: %v — AI integration disabled", err)
-		return false
+		return "", false
 	}
-	if exec.Command("proxenos", "tail", stream, "--tail", "1").Run() == nil {
-		return true // stream already exists
-	}
-	tmp, err := os.CreateTemp("", "bibtui-contract-*.json")
-	if err != nil {
-		proxLogf("contract tempfile: %v", err)
-		return false
-	}
-	defer os.Remove(tmp.Name())
-	if _, err := tmp.Write(proxenosContractJSON); err != nil {
+	if exec.Command("proxenos", "tail", stream, "--tail", "1").Run() != nil {
+		tmp, err := os.CreateTemp("", "bibtui-contract-*.json")
+		if err != nil {
+			proxLogf("contract tempfile: %v", err)
+			return "", false
+		}
+		defer os.Remove(tmp.Name())
+		if _, err := tmp.Write(proxenosContractJSON); err != nil {
+			tmp.Close()
+			proxLogf("contract write: %v", err)
+			return "", false
+		}
 		tmp.Close()
-		proxLogf("contract write: %v", err)
-		return false
+		if out, err := exec.Command("proxenos", "new", stream, "--contract", tmp.Name()).CombinedOutput(); err != nil {
+			proxLogf("proxenos new %s failed: %v (%s)", stream, err, strings.TrimSpace(string(out)))
+			return "", false
+		}
 	}
-	tmp.Close()
-	if out, err := exec.Command("proxenos", "new", stream, "--contract", tmp.Name()).CombinedOutput(); err != nil {
-		proxLogf("proxenos new %s failed: %v (%s)", stream, err, strings.TrimSpace(string(out)))
-		return false
+	path, err := resolveStreamPath(stream)
+	if err != nil {
+		proxLogf("resolve stream path for %s: %v", stream, err)
+		return "", false
 	}
-	return true
+	return path, true
 }
 
-// emitSync sends one event and blocks until proxenos has appended it (or
-// failed to). Used only where the caller is about to exit and a
-// fire-and-forget goroutine would be killed before it runs.
-func (m model) emitSync(typ string, body any) {
-	if m.proxStream == "" {
+// resolveStreamPath asks proxenos for a stream's resolved absolute file
+// path via `ls --json`, rather than recomputing $XDG_DATA_HOME/... by
+// hand — proxenos config can override the streams directory
+// (config.toml's StreamsDir), and the CLI is the only party guaranteed
+// to agree with itself on where a stream actually lives.
+func resolveStreamPath(stream string) (string, error) {
+	out, err := exec.Command("proxenos", "ls", "--json").Output()
+	if err != nil {
+		return "", err
+	}
+	var infos []struct {
+		Name string `json:"name"`
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal(out, &infos); err != nil {
+		return "", err
+	}
+	for _, si := range infos {
+		if si.Name == stream {
+			return si.Path, nil
+		}
+	}
+	return "", fmt.Errorf("stream %q not found in proxenos ls", stream)
+}
+
+// sendProxEvent sends one event and blocks until proxenos has appended it
+// (or failed to). The one place that actually shells out; emit/emitSync/
+// sendProxEventGetID/action.rejected from the inbound poller all funnel
+// through here.
+func sendProxEvent(stream, typ string, body any) {
+	if stream == "" {
 		return
 	}
 	data, err := json.Marshal(body)
@@ -88,20 +118,45 @@ func (m model) emitSync(typ string, body any) {
 		proxLogf("marshal %s: %v", typ, err)
 		return
 	}
-	cmd := exec.Command("proxenos", "send", m.proxStream, typ, string(data), "--as", proxAppSrc)
+	cmd := exec.Command("proxenos", "send", stream, typ, string(data), "--as", proxAppSrc)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		proxLogf("send %s failed: %v (%s)", typ, err, strings.TrimSpace(string(out)))
 	}
 }
 
-// emit fires emitSync in the background. Never blocks the UI goroutine;
-// never panics bibtui if the proxenos binary or stream disappears
-// mid-session — errors land in proxenos.log, not on screen.
+// sendProxEventGetID sends one event and returns the id proxenos stamped
+// it with. Only the ask flow needs this — everything else is
+// fire-and-forget with nothing to correlate against.
+func sendProxEventGetID(stream, typ string, body any) (string, error) {
+	if stream == "" {
+		return "", fmt.Errorf("proxenos integration disabled")
+	}
+	data, err := json.Marshal(body)
+	if err != nil {
+		return "", err
+	}
+	out, err := exec.Command("proxenos", "send", stream, typ, string(data), "--as", proxAppSrc).Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// emitSync sends one event and blocks until proxenos has appended it (or
+// failed to). Used only where the caller is about to exit and a
+// fire-and-forget goroutine would be killed before it runs.
+func (m model) emitSync(typ string, body any) {
+	sendProxEvent(m.proxStream, typ, body)
+}
+
+// emit fires sendProxEvent in the background. Never blocks the UI
+// goroutine; never panics bibtui if the proxenos binary or stream
+// disappears mid-session — errors land in proxenos.log, not on screen.
 func (m model) emit(typ string, body any) {
 	if m.proxStream == "" {
 		return
 	}
-	go m.emitSync(typ, body)
+	go sendProxEvent(m.proxStream, typ, body)
 }
 
 // proxLocationBody builds the read.location body for the chapter bibtui

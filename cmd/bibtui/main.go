@@ -83,6 +83,11 @@ type model struct {
 	proxStream string // non-empty = AI integration enabled, else feature is entirely inert
 	askOpen    bool
 	askInput   string
+
+	proxStreamPath string // resolved absolute path to the stream file (honors proxenos config overrides)
+	pendingQID     string // id of the user.message currently awaiting an answer
+	thinking       bool
+	lastAnswer     string
 }
 
 // withMode switches the app mode and triggers a content rebuild when entering
@@ -249,6 +254,51 @@ func (m model) activeRef() AnnotationRef {
 	return AnnotationRef{Book: c.book.slug, Chapter: c.num, Verse: bestV}
 }
 
+// gotoTo jumps to index position pos (into m.index), optionally to a
+// specific verse, and performs the same bookkeeping the keyboard `:goto`
+// flow does — the single path both a human `:goto` and an agent
+// nav.goto action drive, so they can never drift apart.
+func (m model) gotoTo(pos, verse int) model {
+	if pos < 0 || pos >= len(m.index) {
+		return m
+	}
+	m.pos = pos
+	m = m.withContent()
+	m.scroll = 0
+	if verse > 0 && m.verseMap != nil {
+		if off, ok := m.verseMap[verse]; ok {
+			m.scroll = clamp(off, 0, m.maxScroll())
+		}
+	}
+	if m.mode == modeHome {
+		m.mode = modeReader
+	}
+	saveSession(m)
+	m.recordView()
+	m.emit("read.location", m.proxLocationBody())
+	return m
+}
+
+// stepChapter moves one chapter forward (dir>0) or backward (dir<0),
+// clamped at either end — a no-op there, never an error. The single path
+// both `]`/`[` and an agent nav.step action drive.
+func (m model) stepChapter(dir int) model {
+	switch {
+	case dir > 0 && m.pos < len(m.index)-1:
+		m.pos++
+	case dir < 0 && m.pos > 0:
+		m.pos--
+	default:
+		return m
+	}
+	m = m.withContent()
+	m.scroll = 0
+	saveSession(m)
+	m.recordView()
+	m.emit("read.location", m.proxLocationBody())
+	return m
+}
+
 // ── bubbletea lifecycle ───────────────────────────────────────────────────
 
 func (m model) Init() tea.Cmd { return nil }
@@ -278,20 +328,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.gotoInput = ""
 				m.gotoCands = nil
 				if newPos >= 0 {
-					m.pos = newPos
-					m = m.withContent()
-					m.scroll = 0
-					if verse > 0 && m.verseMap != nil {
-						if off, ok := m.verseMap[verse]; ok {
-							m.scroll = clamp(off, 0, m.maxScroll())
-						}
-					}
-					if m.mode == modeHome {
-						m.mode = modeReader
-					}
-					saveSession(m)
-					m.recordView()
-					m.emit("read.location", m.proxLocationBody())
+					m = m.gotoTo(newPos, verse)
 				}
 			case tea.KeyTab:
 				m = m.gotoComplete()
@@ -325,16 +362,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				text := strings.TrimSpace(m.askInput)
 				m.askOpen = false
 				m.askInput = ""
-				if text != "" {
-					ref := m.activeRef()
-					m.emit("user.message", map[string]any{
-						"text":    text,
-						"book":    ref.Book,
-						"chapter": ref.Chapter,
-						"verse":   ref.Verse,
-						"ref":     ref.String(),
-					})
+				if text == "" {
+					return m, nil
 				}
+				ref := m.activeRef()
+				qid, err := sendProxEventGetID(m.proxStream, "user.message", map[string]any{
+					"text":    text,
+					"book":    ref.Book,
+					"chapter": ref.Chapter,
+					"verse":   ref.Verse,
+					"ref":     ref.String(),
+				})
+				if err != nil {
+					proxLogf("send user.message failed: %v", err)
+					return m, nil
+				}
+				m.pendingQID = qid
+				m.thinking = true
+				m.lastAnswer = ""
+				return m, proxAnswerTimeout(qid)
 			case tea.KeyBackspace:
 				if len(m.askInput) > 0 {
 					runes := []rune(m.askInput)
@@ -343,6 +389,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case tea.KeyRunes:
 				m.askInput += string(msg.Runes)
 			}
+			return m, nil
+		}
+
+		if m.thinking || m.lastAnswer != "" {
+			m.thinking = false
+			m.lastAnswer = ""
+			m.pendingQID = ""
 			return m, nil
 		}
 
@@ -446,23 +499,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+u":
 			m.scroll = clamp(m.scroll-m.vpH()/2, 0, m.maxScroll())
 		case "]":
-			if m.pos < len(m.index)-1 {
-				m.pos++
-				m = m.withContent()
-				m.scroll = 0
-				saveSession(m)
-				m.recordView()
-				m.emit("read.location", m.proxLocationBody())
-			}
+			m = m.stepChapter(1)
 		case "[":
-			if m.pos > 0 {
-				m.pos--
-				m = m.withContent()
-				m.scroll = 0
-				saveSession(m)
-				m.recordView()
-				m.emit("read.location", m.proxLocationBody())
-			}
+			m = m.stepChapter(-1)
 		case "o":
 			m.pickerOpen = true
 		case "n":
@@ -493,6 +532,72 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.askInput = ""
 			}
 		}
+
+	case proxNavGotoMsg:
+		newModel, ok, reason := m.applyNavGoto(msg)
+		if !ok {
+			m.emit("action.rejected", map[string]any{"action": "nav.goto", "reason": reason})
+			return m, nil
+		}
+		return newModel, nil
+
+	case proxNavStepMsg:
+		return m.applyNavStep(msg), nil
+
+	case proxTranslationsSetMsg:
+		newModel, ok, reason := m.applyTranslationsSet(msg)
+		if !ok {
+			m.emit("action.rejected", map[string]any{"action": "translations.set", "reason": reason})
+			return m, nil
+		}
+		return newModel, nil
+
+	case proxGroupsSetMsg:
+		newModel, ok, reason := m.applyGroupsSet(msg)
+		if !ok {
+			m.emit("action.rejected", map[string]any{"action": "groups.set", "reason": reason})
+			return m, nil
+		}
+		return newModel, nil
+
+	case proxNoteCreateMsg:
+		newModel, ok, reason := m.applyNoteCreate(msg)
+		if !ok {
+			m.emit("action.rejected", map[string]any{"action": "note.create", "id": msg.ID, "reason": reason})
+			return m, nil
+		}
+		return newModel, nil
+
+	case proxNoteUpdateMsg:
+		newModel, ok, reason := m.applyNoteUpdate(msg)
+		if !ok {
+			m.emit("action.rejected", map[string]any{"action": "note.update", "id": msg.ID, "reason": reason})
+			return m, nil
+		}
+		return newModel, nil
+
+	case proxNoteDeleteMsg:
+		newModel, ok, reason := m.applyNoteDelete(msg)
+		if !ok {
+			m.emit("action.rejected", map[string]any{"action": "note.delete", "id": msg.ID, "reason": reason})
+			return m, nil
+		}
+		return newModel, nil
+
+	case proxAnswerMsg:
+		if msg.ReplyTo == "" || msg.ReplyTo != m.pendingQID {
+			return m, nil
+		}
+		m.thinking = false
+		m.lastAnswer = msg.Text
+		return m, nil
+
+	case proxAnswerTimeoutMsg:
+		if m.thinking && m.pendingQID == msg.QID {
+			m.thinking = false
+			m.lastAnswer = "agent not responding — check `proxenos ls`"
+		}
+		return m, nil
 	}
 	return m, nil
 }
@@ -869,9 +974,10 @@ func (m model) updateInnerNote(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "y", "Y":
 			if m.store != nil && m.noteCursor < len(m.noteCands) {
+				id := m.noteCands[m.noteCursor].ID
 				m.store.DeleteNoteAt(m.noteRef, m.noteCursor)
 				m.store.Save()
-				m.emit("note.deleted", map[string]any{})
+				m.emit("note.deleted", map[string]any{"id": id})
 				m.noteCands = m.store.NotesAtRef(m.noteRef)
 				if m.noteCursor >= len(m.noteCands) && m.noteCursor > 0 {
 					m.noteCursor--
@@ -912,12 +1018,15 @@ func (m model) updateInnerNote(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Save and return to outer note mode.
 		if m.store != nil {
 			if m.noteEditIdx >= 0 && m.noteEditIdx < len(m.noteCands) {
+				id := m.noteCands[m.noteEditIdx].ID
 				m.store.UpdateNote(m.noteRef, m.noteEditIdx, m.noteInput)
-				m.emit("note.updated", map[string]any{"text": m.noteInput})
+				m.emit("note.updated", map[string]any{"id": id, "text": m.noteInput})
 			} else if m.noteInput != "" {
-				m.store.AddNote(m.noteRef, m.noteInput)
+				created := m.store.AddNote(m.noteRef, m.noteInput)
 				m.activeGroups[notesGroupName] = true
 				m.emit("note.created", map[string]any{
+					"id":      created.ID,
+					"author":  created.Author,
 					"book":    m.noteRef.Book,
 					"chapter": m.noteRef.Chapter,
 					"verse":   m.noteRef.Verse,
@@ -1038,6 +1147,10 @@ func (m model) View() string {
 		return m.viewWithAsk()
 	}
 
+	if m.thinking || m.lastAnswer != "" {
+		return m.viewWithAnswer()
+	}
+
 	if m.pickerOpen {
 		return m.statusBar() + "\n" + m.pickerContent() + "\n" + m.helpBar()
 	}
@@ -1072,6 +1185,28 @@ func (m model) viewWithAsk() string {
 	askBar := helpSt.Render(padToWidth(
 		"  "+pickerCursorSt.Render("?")+" "+m.askInput+"█"+"    enter ask  ·  esc cancel", m.width))
 	return m.statusBar() + "\n" + content + "\n" + askBar
+}
+
+// viewWithAnswer renders the normal content but reserves the bottom line
+// for the agent's reply (or a "thinking…" placeholder) — the receive
+// half of the user.message flow. Dismissed by any keypress.
+func (m model) viewWithAnswer() string {
+	vpH := m.vpH() - 1
+	if vpH < 1 {
+		vpH = 1
+	}
+	end := clamp(m.scroll+vpH, 0, len(m.lines))
+	rows := m.lines[m.scroll:end]
+	content := strings.Join(rows, "\n")
+	if len(rows) < vpH {
+		content += strings.Repeat("\n", vpH-len(rows))
+	}
+	text := m.lastAnswer
+	if m.thinking {
+		text = "thinking…"
+	}
+	bar := helpSt.Render(padToWidth("  "+text+"    press any key to dismiss", m.width))
+	return m.statusBar() + "\n" + content + "\n" + bar
 }
 
 func (m model) pickerContent() string {
@@ -1174,14 +1309,20 @@ func main() {
 	m.session = session
 	m.mode = modeHome
 
-	if proxStream != "" && bootstrapProxenos(proxStream) {
-		m.proxStream = proxStream
+	if proxStream != "" {
+		if path, ok := bootstrapProxenos(proxStream); ok {
+			m.proxStream = proxStream
+			m.proxStreamPath = path
+		}
 	}
 	if m.proxStream != "" {
 		m.emit("app.started", map[string]any{"translations": startTrans, "resumed": session != nil})
 	}
 
 	p := tea.NewProgram(m, tea.WithAltScreen())
+	if m.proxStream != "" {
+		startProxPoll(m.proxStream, m.proxStreamPath, p.Send)
+	}
 	_, runErr := p.Run()
 	m.emitSync("app.exited", map[string]any{})
 	if runErr != nil {
