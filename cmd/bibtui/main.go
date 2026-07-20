@@ -88,6 +88,8 @@ type model struct {
 	pendingQID     string // id of the user.message currently awaiting an answer
 	thinking       bool
 	lastAnswer     string
+	groupsClosed   bool            // true after A collapses the panel
+	savedGroups    map[string]bool // exact active set to restore on A again
 }
 
 // withMode switches the app mode and triggers a content rebuild when entering
@@ -230,6 +232,41 @@ func (m model) withToggled(t string) model {
 		m.translations = append(m.translations, t)
 		sort.Strings(m.translations)
 	}
+	return m
+}
+
+// withGroupsToggled is the single-key complement to the `a` group picker:
+// collapse every active group at once for focused reading (remembering
+// exactly which ones were on), or restore that exact set — never "turn
+// everything on," always your actual prior selection.
+func (m model) withGroupsToggled() model {
+	if m.store == nil || len(sortedGroupNames(m.store)) == 0 {
+		return m
+	}
+	if m.groupsClosed {
+		if m.savedGroups != nil {
+			m.activeGroups = m.savedGroups
+		}
+		m.savedGroups = nil
+		m.groupsClosed = false
+	} else {
+		saved := make(map[string]bool, len(m.activeGroups))
+		anyActive := false
+		for k, v := range m.activeGroups {
+			saved[k] = v
+			anyActive = anyActive || v
+		}
+		if !anyActive {
+			return m // nothing showing to collapse
+		}
+		m.savedGroups = saved
+		for k := range m.activeGroups {
+			m.activeGroups[k] = false
+		}
+		m.groupsClosed = true
+	}
+	m = m.withContent().withScrollClamped()
+	m.emit("annotation.groups_changed", map[string]any{"active": m.activeGroups})
 	return m
 }
 
@@ -474,6 +511,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.groupPickerIdx < len(names) {
 					name := names[m.groupPickerIdx]
 					m.activeGroups[name] = !m.activeGroups[name]
+					m.groupsClosed = false // manual picker edit supersedes any pending A-restore
+					m.savedGroups = nil
 					m = m.withContent().withScrollClamped()
 					m.emit("annotation.groups_changed", map[string]any{"active": m.activeGroups})
 				}
@@ -526,6 +565,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.groupPickerOpen = true
 				m.groupPickerIdx = 0
 			}
+		case "A":
+			m = m.withGroupsToggled()
 		case "?":
 			if m.proxStream != "" {
 				m.askOpen = true
@@ -681,7 +722,7 @@ func (m model) helpBar() string {
 	}
 	var groupHelp string
 	if len(sortedGroupNames(m.store)) > 0 {
-		groupHelp = " ·  a groups"
+		groupHelp = " ·  a groups  ·  A hide/show"
 	}
 	var askHelp string
 	if m.proxStream != "" {
