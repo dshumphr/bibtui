@@ -116,6 +116,32 @@ async function spawnInTern(args: string[], cwd: string): Promise<string | null> 
 	}
 }
 
+/**
+ * Is the app instance this watcher launched still alive? spawnedPid covers
+ * the pty path; tern sessions are checked against `tern ls` (we hold the
+ * session id, not a pid). User-launched apps (launch:'none') are never
+ * "provably alive" — callers must treat that as unknown.
+ */
+async function appAlive(w: Watcher): Promise<boolean> {
+	if (w.spawnedPid) {
+		try {
+			process.kill(w.spawnedPid, 0);
+			return true;
+		} catch {
+			return false;
+		}
+	}
+	if (w.ternBlockId) {
+		try {
+			const { stdout } = await execFileP("tern", ["ls"], { timeout: 5000 });
+			return stdout.includes(w.ternBlockId);
+		} catch {
+			return false;
+		}
+	}
+	return false;
+}
+
 function sleep(ms: number): Promise<void> {
 	const { promise, resolve } = Promise.withResolvers<void>();
 	setTimeout(resolve, ms);
@@ -323,6 +349,9 @@ export default function proxenosBibtuiExtension(pi: ExtensionAPI) {
 			"notes, translation changes) arrives silently as hidden context on your next turn. " +
 			"If the user asks for something at a milestone ('quiz me when I finish a book'), " +
 			"call this again with milestones:true — it reconfigures in place without relaunching. " +
+			"Calling it again with default launch also guarantees the app is open: if the previous " +
+			"instance exited, a fresh one is launched automatically — never improvise tmux/screen " +
+			"commands for this. " +
 			"Never add chatty types to wakeTypes: each is a paid turn per event.",
 		approval: "exec",
 		parameters: z.object({
@@ -339,23 +368,38 @@ export default function proxenosBibtuiExtension(pi: ExtensionAPI) {
 			const translations = (params.translations ?? "kjv").split(/\s+/).filter(Boolean);
 			const args = ["./bibtui", "--proxenos", stream, ...translations];
 
-			// Reconfiguration short-circuit: an existing watcher is updated in place
-			// (new wake rules / milestones) and bibtui is NOT spawned again.
-			if (watchers.has(stream)) {
+			// Reconfigure vs relaunch: an existing watcher is updated in place, but
+			// "reconfigure" must never stand in for "the app is open" — omp's xd://
+			// kernel retains extension state across sessions, so a watcher can
+			// outlive its app. If the caller wants the app open (launch:'auto')
+			// and the previously launched instance is dead, fall through and
+			// launch a fresh one against the same watcher.
+			const existing = watchers.get(stream);
+			if (existing) {
 				startWatcher(stream, "", undefined, params.wakeTypes, params.milestones);
-				return {
-					content: [
-						{
-							type: "text",
-							text:
-								`Watcher for stream "${stream}" reconfigured: ` +
-								`wakeTypes=[${params.wakeTypes?.join(", ") ?? "user.message (default)"}], ` +
-								`milestones=${params.milestones ?? "unchanged"}. ` +
-								"No new app instance was launched.",
-						},
-					],
-					details: { stream, reconfigured: true },
-				};
+				const wantsLaunch = (params.launch ?? "auto") === "auto";
+				const alive = await appAlive(existing);
+				if (!wantsLaunch || alive) {
+					const state = alive
+						? `bibtui is running (pid ${existing.spawnedPid ?? "?"}${existing.ternBlockId ? `, tern session ${existing.ternBlockId}` : ""})`
+						: "watch-only mode — the user runs bibtui themselves";
+					return {
+						content: [
+							{
+								type: "text",
+								text:
+									`Watcher for stream "${stream}" reconfigured: ` +
+									`wakeTypes=[${params.wakeTypes?.join(", ") ?? "user.message (default)"}], ` +
+									`milestones=${params.milestones ?? "unchanged"}. ${state}. ` +
+									"No new app instance was launched.",
+							},
+						],
+						details: { stream, reconfigured: true, appAlive: alive },
+					};
+				}
+				// Dead app, caller wants it open: clean stale handles and relaunch.
+				existing.spawnedPid = undefined;
+				existing.ternBlockId = null;
 			}
 
 			let launchedVia: string | null = null;
