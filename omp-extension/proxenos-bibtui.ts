@@ -356,7 +356,8 @@ export default function proxenosBibtuiExtension(pi: ExtensionAPI) {
 		approval: "exec",
 		parameters: z.object({
 			dir: z.string().optional().describe("Directory containing the bibtui binary and bibles/ (default: current directory)"),
-			stream: z.string().optional().describe("Proxenos stream name (default: bibtui-omp)"),
+			stream: z.string().optional().describe("Proxenos stream name or <relay>:<stream> reference (default: bibtui-omp). Use a relay ref when the stream lives on a relay — e.g. the agent host's relay — so this UI-side app and the agent-side watcher share one stream across machines."),
+			dataDir: z.string().optional().describe("Directory holding stream files when watching a relay's LOCAL data dir on this machine (its <data-dir>/streams). Ignored for relay refs (no local file — the watcher tails via CLI)."),
 			translations: z.string().optional().describe("Space-separated translation codes, e.g. 'kjv web' (default: kjv)"),
 			launch: z.enum(["auto", "none"]).optional().describe("'auto' (default) spawns bibtui in a detected multiplexer pane; 'none' only watches the stream — the user runs bibtui themselves"),
 			wakeTypes: z.array(z.string()).optional().describe("Event types that start a model turn (default: only user.message). Keep minimal — every wake costs a turn. All other events arrive free as hidden context on the next turn."),
@@ -462,7 +463,19 @@ export default function proxenosBibtuiExtension(pi: ExtensionAPI) {
 				}
 			}
 
-			const filePath = path.join(streamsDir(), `${stream}.jsonl`);
+			const filePath = (() => {
+				// Relay ref (<relay>:<stream>): the stream file lives in the relay's
+				// data dir on THIS machine (the agent host runs the relay), so the
+				// file watcher reads it there; sends still go through the CLI with
+				// the full ref. Bare names keep the default XDG streams dir.
+				const colon = stream.indexOf(":");
+				if (colon < 0) {
+					return path.join(params.dataDir ?? streamsDir(), `${stream}.jsonl`);
+				}
+				const bare = stream.slice(colon + 1);
+				const dir = params.dataDir ?? path.join(os.homedir(), ".local", "state", "proxenos-relay", "streams");
+				return path.join(dir, `${bare}.jsonl`);
+			})();
 			let found = false;
 			for (let i = 0; i < STREAM_WAIT_MS / 250; i++) {
 				if (fs.existsSync(filePath)) {

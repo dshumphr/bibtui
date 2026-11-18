@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"sort"
 	"strings"
 	"syscall"
@@ -108,10 +110,95 @@ func parseProxRecords(data []byte) []proxEvent {
 // teardown, which is fine — the cursor is persisted after every tick
 // that applied something, never deferred to exit.
 func startProxPoll(stream, path string, send func(tea.Msg)) {
-	if stream == "" || path == "" {
+	if stream == "" {
+		return
+	}
+	if path == "" {
+		go runProxPollRelay(stream, send)
 		return
 	}
 	go runProxPoll(stream, path, send)
+}
+
+// runProxPollRelay consumes a relay stream (ref "<relay>:<stream>") through
+// `proxenos tail <ref> -f`: one child process that replays the full history
+// and then follows live over SSE, printing the same NDJSON records a local
+// file holds. The cursor still gates application: records are skipped until
+// the last-applied id is seen; if it never appears (fresh/compacted stream),
+// everything appended before process start is skipped instead — relay ts is
+// server-stamped, so startup time is a safe baseline (small mac↔relay clock
+// skew tolerated with slack).
+func runProxPollRelay(stream string, send func(tea.Msg)) {
+	cursor := loadProxCursor()
+	startup := time.Now().Add(-5 * time.Second)
+
+	cmd := exec.Command("proxenos", "tail", stream, "-f")
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		proxLogf("inbound: tail pipe: %v", err)
+		return
+	}
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		proxLogf("inbound: tail start: %v", err)
+		return
+	}
+	defer func() {
+		if cmd.Process != nil {
+			proc := cmd.Process
+			go func() {
+				time.Sleep(2 * time.Second) // grace for the SSE read loop
+				_ = proc.Kill()
+			}()
+		}
+	}()
+
+	sc := bufio.NewScanner(stdout)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	baselined := false
+	seen := make(map[string]bool, 256)
+	for sc.Scan() {
+		line := bytes.TrimSpace(sc.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		var r proxEvent
+		if err := json.Unmarshal(line, &r); err != nil {
+			proxLogf("inbound: skipping malformed record: %v", err)
+			continue
+		}
+		if seen[r.ID] {
+			continue // reconnect/replay overlap — the contract's dedupe rule
+		}
+		if !baselined {
+			if r.ID != "" && r.ID == cursor.LastSeenID {
+				baselined = true // resume exactly after the last applied event
+				continue
+			}
+			if ts, err := time.Parse(time.RFC3339, r.TS); err == nil && ts.After(startup) {
+				baselined = true // cursor id gone (or fresh state): baseline at "now"
+			} else {
+				continue
+			}
+		}
+		seen[r.ID] = true
+		if len(seen) > 512 {
+			for k := range seen { // bounded: drop an arbitrary quarter
+				delete(seen, k)
+				if len(seen) <= 384 {
+					break
+				}
+			}
+		}
+		applyProxRecord(stream, r, send)
+		proxLogf("relay-poll: applied %s %s reply_to=%q", r.Type, r.ID, r.ReplyTo)
+		cursor.LastSeenID = r.ID
+		saveProxCursor(cursor)
+	}
+	if err := sc.Err(); err != nil {
+		proxLogf("inbound: tail read: %v", err)
+	}
+	proxLogf("inbound: relay tail exited: %v", cmd.Wait())
 }
 
 func runProxPoll(stream, path string, send func(tea.Msg)) {

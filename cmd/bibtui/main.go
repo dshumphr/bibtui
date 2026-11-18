@@ -441,6 +441,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.thinking = false
 			m.lastAnswer = ""
 			m.pendingQID = ""
+			// '?' during a pending answer means "ask something else" — reopen
+			// a fresh ask instead of swallowing the key (a bare dismiss made
+			// every following keystroke leak into the reader: the 'o' in
+			// "probe" opened the translations picker, 'q' would quit).
+			if msg.String() == "?" {
+				m.askOpen = true
+				m.askInput = ""
+			}
 			return m, nil
 		}
 
