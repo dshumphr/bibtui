@@ -416,7 +416,10 @@ export default function proxenosBibtuiExtension(pi: ExtensionAPI) {
 			w.ternBlockId = ternBlockId;
 
 			const opening = launchedVia
-				? `bibtui is open (${launchedVia}) on stream "${stream}".`
+				? `bibtui is open (${launchedVia}) on stream "${stream}".` +
+					(launchedVia === "tern tab"
+						? ` Blocks live in the tern daemon on this machine — they render in the user's tern window when attached (tern ssh <this-host>); attach later and they come back with their scrollback.`
+						: "")
 				: `Watching stream "${stream}" — waiting for the user to open bibtui in their own pane (${args.join(" ")}).`;
 			const configLine =
 				`Wake rules: user.message${w.wake.size ? " + " + [...w.wake].join(", ") : ""}` +
