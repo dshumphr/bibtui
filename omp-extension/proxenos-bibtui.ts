@@ -21,10 +21,13 @@
  * or run `omp -e /path/to/proxenos-bibtui.ts`.
  */
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { promisify } from "node:util";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+
+const execFileP = promisify(execFile);
 
 interface Envelope {
 	v: number;
@@ -44,6 +47,8 @@ interface Watcher {
 	timer: NodeJS.Timeout;
 	seen: Set<string>;
 	spawnedPid?: number;
+	/** tern block id when bibtui was spawned via the tern CLI (shutdown kills it). */
+	ternBlockId?: string | null;
 	/** Event types that start a turn. Everything else lands in the digest. */
 	wake: Set<string>;
 	/** Wake on book transitions (read.location with a different book than before). */
@@ -60,14 +65,40 @@ const DIGEST_FLUSH_MS = 2_000;
 const DIGEST_MAX_LINES = 24;
 const DIGEST_LINE_MAX = 140;
 
-/** Multiplexer omp can spawn into, detected from the session environment. */
-function detectMultiplexer(): "herdr" | "tmux" | "zellij" | "cmux" | "orca" {
+/**
+ * Multiplexer omp can spawn into, detected from the session environment.
+ * null = none recognized (tern, WezTerm, plain terminal) — the launch chain
+ * then tries the tern CLI before falling back to a detached pty.
+ */
+function detectMultiplexer(): "herdr" | "tmux" | "zellij" | "cmux" | "orca" | null {
 	const e = process.env;
 	if (e.HERDR_ENV) return "herdr";
+	if (e.TMUX) return "tmux";
 	if (e.ZELLIJ) return "zellij";
 	if (e.CMUX_WORKSPACE_ID || e.CMUX_SURFACE_ID) return "cmux";
 	if (e.ORCA_PANE_KEY) return "orca";
-	return "tmux";
+	return null;
+}
+
+/**
+ * Spawn argv in a new tern tab via the tern CLI and return the block id.
+ * omp has no tern launch adapter yet (can1357/oh-my-pi#15366, confirmed
+ * absent from providers.ts on main), but the tern CLI itself can spawn
+ * blocks — the CLI talks to tern's daemon, so this works from inside an
+ * omp pane running in tern. Syntax per the #15366 workaround; unverified
+ * here (no tern install on the dev box) — failures fall through to the
+ * detached-pty path, never abort the launch.
+ */
+async function spawnInTern(args: string[], cwd: string): Promise<string | null> {
+	try {
+		const { stdout } = await execFileP("tern", ["new", "tab", "--json", "--cwd", cwd, "--keep-open", "--", ...args], { timeout: 10_000 });
+		const parsed = JSON.parse(stdout) as { id?: string | number; block?: string | number };
+		const id = parsed?.id ?? parsed?.block;
+		return id !== undefined ? String(id) : null;
+	} catch (err) {
+		console.error(`[proxenos-bibtui] tern new tab failed: ${String(err)}`);
+		return null;
+	}
 }
 
 function sleep(ms: number): Promise<void> {
@@ -270,9 +301,9 @@ export default function proxenosBibtuiExtension(pi: ExtensionAPI) {
 			"then watch the stream: the user's questions typed in bibtui (press ?) are injected " +
 			"into this session so you can answer them in-context. Prefer this over telling the " +
 			"user to run bibtui themselves when they want to read together. " +
-			"Use launch:'none' when the user's terminal is one omp cannot spawn into " +
-			"(tern, standalone WezTerm, plain terminal without tmux): the watcher still works — " +
-			"the user just opens bibtui in their own split/pane with `./bibtui --proxenos <stream>`. " +
+			"Use launch:'none' only if the user explicitly wants to run bibtui themselves — " +
+			"the watcher still works, the user just opens bibtui in their own split/pane " +
+			"with `./bibtui --proxenos <stream>`. " +
 			"COST MODEL: only user.message wakes a turn by default; every other event (navigation, " +
 			"notes, translation changes) arrives silently as hidden context on your next turn. " +
 			"If the user asks for something at a milestone ('quiz me when I finish a book'), " +
@@ -314,33 +345,45 @@ export default function proxenosBibtuiExtension(pi: ExtensionAPI) {
 
 			let launchedVia: string | null = null;
 			let spawnedPid: number | undefined;
+			let ternBlockId: string | null = null;
 			const wantsLaunch = (params.launch ?? "auto") === "auto";
-			if (wantsLaunch && ctx.ui?.openTerminal) {
-				try {
-					// The request type is a per-multiplexer union (each with its own
-					// capability-specific extras); the plain pane request below is valid
-					// for every supported multiplexer, but TS can't prove that across the
-					// union — hence the single cast at the call boundary.
-					const req = { multiplexer: detectMultiplexer(), placement: "pane", command: args, cwd: dir } as Parameters<
-						NonNullable<typeof ctx.ui.openTerminal>
-					>[0];
-					await ctx.ui.openTerminal(req);
-					launchedVia = "multiplexer pane";
-				} catch (err) {
-					pi.logger.debug("proxenos-bibtui: openTerminal failed, falling back", { err: String(err) });
+			if (wantsLaunch) {
+				const mux = detectMultiplexer();
+				if (mux && ctx.ui?.openTerminal) {
+					try {
+						// The request type is a per-multiplexer union (each with its own
+						// capability-specific extras); the plain pane request below is valid
+						// for every supported multiplexer, but TS can't prove that across the
+						// union — hence the single cast at the call boundary.
+						const req = { multiplexer: mux, placement: "pane", command: args, cwd: dir } as Parameters<
+							NonNullable<typeof ctx.ui.openTerminal>
+						>[0];
+						await ctx.ui.openTerminal(req);
+						launchedVia = `${mux} pane`;
+					} catch (err) {
+						pi.logger.debug("proxenos-bibtui: openTerminal failed, falling back", { err: String(err) });
+					}
 				}
-			}
-			if (wantsLaunch && launchedVia === null) {
-				// No multiplexer available: give the TUI its own pty via script(1) so
-				// bubbletea doesn't die on a closed stdout. Output goes nowhere —
-				// fine for headless; users will normally have tmux.
-				const child = spawn("script", ["-qec", args.join(" "), "/dev/null"], {
-					cwd: dir,
-					detached: true,
-					stdio: "ignore",
-				});
-				child.unref();
-				spawnedPid = child.pid;
+				if (!launchedVia) {
+					// Not inside an omp-recognized multiplexer: tern (omp lacks an
+					// adapter, #15366) or a plain terminal. Try the tern CLI directly;
+					// it no-ops fast if tern isn't installed, and we fall on.
+					ternBlockId = await spawnInTern(args, dir);
+					if (ternBlockId !== null) launchedVia = "tern tab";
+				}
+				if (!launchedVia) {
+					// Last resort: the TUI gets its own pty via script(1) so bubbletea
+					// doesn't die on a closed stdout. Output goes nowhere — fine for
+					// headless; the watcher still works, only typing needs a real pane.
+					const child = spawn("script", ["-qec", args.join(" "), "/dev/null"], {
+						cwd: dir,
+						detached: true,
+						stdio: "ignore",
+					});
+					child.unref();
+					spawnedPid = child.pid;
+					launchedVia = "detached pty";
+				}
 			}
 
 			const filePath = path.join(streamsDir(), `${stream}.jsonl`);
@@ -370,6 +413,7 @@ export default function proxenosBibtuiExtension(pi: ExtensionAPI) {
 			}
 
 			const w = startWatcher(stream, filePath, spawnedPid, params.wakeTypes, params.milestones);
+			w.ternBlockId = ternBlockId;
 
 			const opening = launchedVia
 				? `bibtui is open (${launchedVia}) on stream "${stream}".`
@@ -405,6 +449,14 @@ export default function proxenosBibtuiExtension(pi: ExtensionAPI) {
 					process.kill(-w.spawnedPid, "SIGTERM"); // script(1) made it a group leader
 				} catch {
 					/* already gone */
+				}
+			}
+			if (w.ternBlockId) {
+				// Only kill blocks the extension spawned, never user-created ones.
+				try {
+					await execFileP("tern", ["kill", w.ternBlockId], { timeout: 5000 });
+				} catch {
+					/* already gone or tern absent */
 				}
 			}
 		}
