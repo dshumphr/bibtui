@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -25,20 +26,31 @@ const proxAppSrc = "app:bibtui"
 //go:embed proxenos-contract.json
 var proxenosContractJSON []byte
 
-// parseArgs pulls "--proxenos <stream>" out of the argv, leaving the
-// remaining positional args (translation codes) untouched. bibtui has no
-// other flags, so this is a minimal hand-rolled scan rather than pulling
-// in the flag package for one option.
-func parseArgs(args []string) (proxStream string, rest []string) {
+// parseArgs pulls "--proxenos <stream>" and "--agent <name>" out of the
+// argv, leaving the remaining positional args (translation codes)
+// untouched. bibtui has no other flags, so this is a minimal hand-rolled
+// scan rather than pulling in the flag package for two options.
+//
+// --agent names the proxenos adapter to attach (e.g. "omp", "claude",
+// "test"). Absent = no agent session is started; bibtui still emits to the
+// stream, but nothing wakes a harness. This is the app-owned attach: the
+// bridge's lifetime is bibtui's own, so starting a session is just
+// starting the app with one flag — no second terminal, no systemd unit.
+func parseArgs(args []string) (proxStream, proxAgent string, rest []string) {
 	for i := 0; i < len(args); i++ {
-		if args[i] == "--proxenos" && i+1 < len(args) {
+		switch {
+		case args[i] == "--proxenos" && i+1 < len(args):
 			proxStream = args[i+1]
-			i++
+			i++ // skip the value
+			continue
+		case args[i] == "--agent" && i+1 < len(args):
+			proxAgent = args[i+1]
+			i++ // skip the value
 			continue
 		}
 		rest = append(rest, args[i])
 	}
-	return proxStream, rest
+	return proxStream, proxAgent, rest
 }
 
 // bootstrapProxenos idempotently ensures the stream exists (seeded with
@@ -157,6 +169,89 @@ func (m model) emit(typ string, body any) {
 		return
 	}
 	go sendProxEvent(m.proxStream, typ, body)
+}
+
+// attachAppOwned starts the proxenos bridge (proxenos attach) as a child
+// process of bibtui itself, stopped when bibtui exits. This is the "app
+// owns its bridge" pattern: the user starts a session by starting the app
+// — `./bibtui --proxenos bibtui --agent omp` — instead of provisioning a
+// second terminal or a systemd unit by hand. The bridge is one-directional
+// (stream → harness) exactly as documented; the harness speaks back via
+// `proxenos send` on its own.
+//
+// stdout/stderr go to proxenos-attach.log beside the other app state files
+// (same "files over apps" convention as proxLogf), so attach failures are
+// diagnosable without touching the TUI's alt-screen.
+//
+// On failure the attach is dropped for this run and nil is returned — the
+// same degradation rule as bootstrapProxenos: middleware trouble never
+// blocks reading.
+func attachAppOwned(stream, agent string) *proxAttach {
+	// Name the attachment after the process so `proxenos ls` shows who
+	// owns it and a second bibtui on the same stream can't silently share
+	// one attachment name. One bibtui per (stream, agent) is the sane
+	// ceiling; a second run with the same --as fails loudly in the log
+	// rather than forking the conversation.
+	name := "bibtui-" + agent
+	logf, err := os.OpenFile("proxenos-attach.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		proxLogf("attach: log file: %v", err)
+		return nil
+	}
+	cmd := exec.Command("proxenos", "attach", stream, "--as", name, "--agent", agent,
+		// Only real questions should wake (and pay for) a harness turn —
+		// the same default the operator runbook documents. stream.* types
+		// always pass the filter regardless.
+		"--types", "user.message")
+	cmd.Stdout = logf
+	cmd.Stderr = logf
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true} // own pgroup; not SIGINT'd by the TUI's Ctrl-C, and stopProxAttach can signal the group
+	if err := cmd.Start(); err != nil {
+		logf.Close()
+		proxLogf("attach: start: %v", err)
+		return nil
+	}
+	fmt.Fprintf(logf, "=== %s: attach pid %d (agent %s) ===\n", time.Now().UTC().Format(time.RFC3339), cmd.Process.Pid, agent)
+	proxLogf("attach: pid %d as %s agent %s", cmd.Process.Pid, name, agent)
+	a := &proxAttach{cmd: cmd, logf: logf, done: make(chan struct{})}
+	// The reaper owns the one Wait: a bridge that dies mid-session is
+	// reaped immediately (no zombie) and unblocks stopProxAttach later.
+	go func() {
+		if err := cmd.Wait(); err != nil {
+			proxLogf("attach: bridge exited: %v", err)
+		} else {
+			proxLogf("attach: bridge exited cleanly")
+		}
+		close(a.done)
+	}()
+	return a
+}
+
+// stopProxAttach terminates the app-owned bridge: SIGTERM the bridge's
+// process group (attach sets Setpgid, so -pid reaches it and any
+// grandchildren), wait briefly, then SIGKILL. Called on bibtui's normal
+// exit paths; a SIGKILL'd bibtui can't run it — that residue is visible
+// in `proxenos ls` and killable by hand (documented).
+func stopProxAttach(a *proxAttach) {
+	if a == nil || a.cmd.Process == nil {
+		return
+	}
+	proxLogf("attach: stopping bridge pid %d", a.cmd.Process.Pid)
+	syscall.Kill(-a.cmd.Process.Pid, syscall.SIGTERM)
+	select {
+	case <-a.done:
+	case <-time.After(2 * time.Second):
+		syscall.Kill(-a.cmd.Process.Pid, syscall.SIGKILL)
+		<-a.done
+	}
+	a.logf.Close()
+}
+
+// proxAttach carries one app-owned bridge and its single-Wait lifecycle.
+type proxAttach struct {
+	cmd  *exec.Cmd
+	logf *os.File
+	done chan struct{} // closed by the reaper once Wait returns
 }
 
 // proxLocationBody builds the read.location body for the chapter bibtui

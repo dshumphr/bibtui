@@ -1322,7 +1322,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "warning: could not load divergence data: %v\n", err)
 	}
 
-	proxStream, startTrans := parseArgs(os.Args[1:])
+	proxStream, proxAgent, startTrans := parseArgs(os.Args[1:])
 	if len(startTrans) == 0 {
 		startTrans = []string{"kjv"}
 		found := false
@@ -1368,6 +1368,10 @@ func main() {
 			m.proxStreamPath = path
 		}
 	}
+	var attach *proxAttach
+	if m.proxStream != "" && proxAgent != "" {
+		attach = attachAppOwned(proxStream, proxAgent)
+	}
 	if m.proxStream != "" {
 		m.emit("app.started", map[string]any{"translations": startTrans, "resumed": session != nil})
 	}
@@ -1377,6 +1381,7 @@ func main() {
 		startProxPoll(m.proxStream, m.proxStreamPath, p.Send)
 	}
 	_, runErr := p.Run()
+	stopProxAttach(attach)
 	m.emitSync("app.exited", map[string]any{})
 	if runErr != nil {
 		fmt.Fprintln(os.Stderr, runErr)

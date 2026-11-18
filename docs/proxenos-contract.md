@@ -167,11 +167,32 @@ silent hang.
 
 ## Setup (operator runbook)
 
+Classic bridge-owned setup (bridge outlives the app; managed by you):
+
 ```sh
 proxenos new bibtui --contract docs/proxenos-contract.json   # once, idempotent (bibtui checks existence first)
 proxenos attach bibtui --as main --agent claude --types user.message   # separate terminal / systemd unit
 ./bibtui kjv web                                               # the app itself
 ```
+
+**App-owned attach (recommended):** bibtui starts and reaps its own bridge,
+so a session is just the app with two flags — no second terminal, no unit
+file:
+
+```sh
+./bibtui --proxenos bibtui --agent claude kjv web
+```
+
+`--agent` names a proxenos adapter (`claude`, `omp`, `codex`, `test` — the
+last is the zero-cost scripted harness). The bridge runs as a bibtui child
+with its own process group (your Ctrl-C in the TUI doesn't kill it), logs
+to `proxenos-attach.log`, uses attachment name `bibtui-<agent>` (visible in
+`proxenos ls`), and dies with the app. Only `user.message` wakes the
+harness — the same cost default the manual runbook recommends. When the app
+exits, the session is gone; resume next launch (proxenos reuses the harness
+session id from attachment state). A user who wants the bridge to outlive
+the app (agent answering while the reader is closed) still uses the manual
+setup above.
 
 `--types user.message` is the recommended default: only real questions
 wake (and pay for) a harness turn. `read.location` and `note.*` still land
