@@ -407,6 +407,23 @@ export default function proxenosBibtuiExtension(pi: ExtensionAPI) {
 			let ternBlockId: string | null = null;
 			const wantsLaunch = (params.launch ?? "auto") === "auto";
 			if (wantsLaunch) {
+				// Validate the app exists before creating any block/session —
+				// otherwise a wrong dir spawns a doomed shell block (seen live:
+				// "./bibtui: Is a directory") that only confuses the user.
+				if (!fs.existsSync(path.join(dir, "bibtui"))) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: `No bibtui binary at ${path.join(dir, "bibtui")}. ` +
+									`Pass dir=<repo root containing the bibtui binary and bibles/> — ` +
+									`e.g. dir=/home/danh/src/bibtui — and retry. ` +
+									`Nothing was launched.`,
+							},
+						],
+						details: { stream, launched: false, dir },
+					};
+				}
 				const mux = detectMultiplexer();
 				if (mux && ctx.ui?.openTerminal) {
 					try {
