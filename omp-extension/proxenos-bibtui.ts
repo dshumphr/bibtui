@@ -81,37 +81,24 @@ function detectMultiplexer(): "herdr" | "tmux" | "zellij" | "cmux" | "orca" | nu
 }
 
 /**
- * Spawn argv in a tern block via the tern CLI and return the session id.
- * omp has no tern launch adapter yet (can1357/oh-my-pi#15366), but the tern
- * CLI drives tern's daemon directly, so this works from an omp pane in tern
- * (or over ssh, since the daemon is per-machine and lives where omp runs).
- *
- * Verified against tern v0.7.10: `tern new` spawns agent adapters (no
- * arbitrary-argv spawn — the `-- <cmd>` form from oh-my-pi#15366 predates
- * this version), so the recipe is a `shell`-adapter session rooted in the
- * app's directory plus `tern send` to run the command inside it. `tern new`
- * auto-starts the daemon when absent. Failures fall through to the
- * detached-pty path, never abort the launch.
+ * Spawn argv in a new Tern tab and return the block id. Verified against
+ * Stencil Tern: `tern new tab --json --cwd DIR --keep-open -- ARGV...` runs
+ * the command in a new tab of the session the calling pane belongs to, and
+ * every window showing that session (including a Mac window attached over
+ * tern's remote service) displays it live. argv goes straight to execFile —
+ * no shell, no quoting. Failures fall through to the detached-pty path.
  */
 async function spawnInTern(args: string[], cwd: string): Promise<string | null> {
 	try {
-		const name = `bibtui-${Date.now().toString(36)}`;
 		const { stdout } = await execFileP(
 			"tern",
-			["new", "-agent", "shell", "-C", cwd, "-name", name, "-json"],
-			{ timeout: 15_000 },
+			["new", "tab", "--json", "--cwd", cwd, "--keep-open", "--", ...args],
+			{ timeout: 20_000 },
 		);
-		const created = JSON.parse(stdout) as { id?: string };
-		if (!created?.id) return null;
-		// One shell line; elements are app argv — single-quote anything with
-		// spaces or shell metacharacters so the join is safe.
-		const line = args
-			.map(a => (/^[A-Za-z0-9_./:=-]+$/.test(a) ? a : `'${a.replaceAll("'", "'\\''")}'`))
-			.join(" ");
-		await execFileP("tern", ["send", created.id, line], { timeout: 10_000 });
-		return created.id;
+		const created = JSON.parse(stdout) as { block?: number | string };
+		return created?.block !== undefined ? String(created.block) : null;
 	} catch (err) {
-		console.error(`[proxenos-bibtui] tern spawn failed: ${String(err)}`);
+		console.error(`[proxenos-bibtui] tern new tab failed: ${String(err)}`);
 		return null;
 	}
 }
@@ -133,7 +120,7 @@ async function appAlive(w: Watcher): Promise<boolean> {
 	}
 	if (w.ternBlockId) {
 		try {
-			const { stdout } = await execFileP("tern", ["ls"], { timeout: 5000 });
+			const { stdout } = await execFileP("tern", ["ls", "--json"], { timeout: 5000 });
 			return stdout.includes(w.ternBlockId);
 		} catch {
 			return false;
@@ -546,7 +533,7 @@ export default function proxenosBibtuiExtension(pi: ExtensionAPI) {
 			if (w.ternBlockId) {
 				// Only kill sessions the extension spawned, never user-created ones.
 				try {
-					await execFileP("tern", ["kill", w.ternBlockId], { timeout: 5000 });
+					await execFileP("tern", ["close", w.ternBlockId], { timeout: 5000 });
 				} catch {
 					/* already gone or tern absent */
 				}
