@@ -90,21 +90,56 @@ function detectMultiplexer(): "herdr" | "tmux" | "zellij" | "cmux" | "orca" | nu
  * to execFile: no shell, no quoting. Failures fall through to the detached-pty
  * path.
  */
-async function spawnInTern(args: string[], cwd: string): Promise<string | null> {
+async function spawnInTern(args: string[], cwd: string, target?: string): Promise<string | null> {
+	// Split beside the target pane. The extension runs in omp's shared kernel,
+	// which has no TERN_PANE, so the agent passes its own pane id (from
+	// `echo $TERN_PANE` in its shell); @focused is the last resort.
+	const pane = target || process.env.TERN_PANE || "@focused";
 	try {
-		// Beside the conversation when we know the omp block (TERN_PANE),
-		// otherwise a new tab. Both print the new block id as JSON.
-		const pane = process.env.TERN_PANE;
-		const argv = pane
-			? ["split", "--json", pane, "right", "--cwd", cwd, "--keep-open", "--", ...args]
-			: ["new", "tab", "--json", "--cwd", cwd, "--keep-open", "--", ...args];
-		const { stdout } = await execFileP("tern", argv, { timeout: 20_000 });
+		const { stdout } = await execFileP(
+			"tern",
+			["split", "--json", pane, "right", "--cwd", cwd, "--keep-open", "--", ...args],
+			{ timeout: 20_000 },
+		);
+		const created = JSON.parse(stdout) as { block?: number | string };
+		if (created?.block !== undefined) return String(created.block);
+	} catch (err) {
+		console.error(`[proxenos-bibtui] tern split failed, trying a new tab: ${String(err)}`);
+	}
+	try {
+		const { stdout } = await execFileP(
+			"tern",
+			["new", "tab", "--json", "--cwd", cwd, "--keep-open", "--", ...args],
+			{ timeout: 20_000 },
+		);
 		const created = JSON.parse(stdout) as { block?: number | string };
 		return created?.block !== undefined ? String(created.block) : null;
 	} catch (err) {
 		console.error(`[proxenos-bibtui] tern spawn failed: ${String(err)}`);
 		return null;
 	}
+}
+
+/**
+ * Resolve the app directory: it must contain an executable `bibtui` file.
+ * A common mistake is passing the repo's PARENT (dir=/tmp where /tmp/bibtui
+ * is the repo) — accept that shape too by looking one level down. Returns
+ * null when neither shape holds, so callers can fail loudly instead of
+ * spawning `./bibtui` into "Is a directory" (exit 126).
+ */
+function resolveAppDir(dir: string): string | null {
+	const isExec = (p: string): boolean => {
+		try {
+			const st = fs.statSync(p);
+			return st.isFile() && (st.mode & 0o111) !== 0;
+		} catch {
+			return false;
+		}
+	};
+	if (isExec(path.join(dir, "bibtui"))) return dir;
+	const nested = path.join(dir, "bibtui");
+	if (isExec(path.join(nested, "bibtui"))) return nested;
+	return null;
 }
 
 /**
@@ -350,11 +385,14 @@ export default function proxenosBibtuiExtension(pi: ExtensionAPI) {
 			dataDir: z.string().optional().describe("Directory holding stream files when watching a relay's LOCAL data dir on this machine (its <data-dir>/streams). Ignored for relay refs (no local file — the watcher tails via CLI)."),
 			translations: z.string().optional().describe("Space-separated translation codes, e.g. 'kjv web' (default: kjv)"),
 			launch: z.enum(["auto", "none"]).optional().describe("'auto' (default) spawns bibtui in a detected multiplexer pane; 'none' only watches the stream — the user runs bibtui themselves"),
+			block: z.string().optional().describe("Tern block to split beside (the pane you are talking in). Get it from your shell: echo $TERN_PANE — pass that id so the app opens beside this conversation, not in whatever tab happens to be focused."),
 			wakeTypes: z.array(z.string()).optional().describe("Event types that start a model turn (default: only user.message). Keep minimal — every wake costs a turn. All other events arrive free as hidden context on the next turn."),
 			milestones: z.boolean().optional().describe("Also wake when the user finishes a book (read.location book transition). For promises like 'quiz me at the end of each book'."),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const dir = params.dir ?? process.cwd();
+			const requestedDir = params.dir ?? process.cwd();
+			const appDir = resolveAppDir(requestedDir);
+			const dir = appDir ?? requestedDir;
 			const stream = params.stream ?? "bibtui-omp";
 			const translations = (params.translations ?? "kjv").split(/\s+/).filter(Boolean);
 			const args = ["./bibtui", "--proxenos", stream, ...translations];
@@ -398,21 +436,19 @@ export default function proxenosBibtuiExtension(pi: ExtensionAPI) {
 			let ternBlockId: string | null = null;
 			const wantsLaunch = (params.launch ?? "auto") === "auto";
 			if (wantsLaunch) {
-				// Validate the app exists before creating any block/session —
-				// otherwise a wrong dir spawns a doomed shell block (seen live:
-				// "./bibtui: Is a directory") that only confuses the user.
-				if (!fs.existsSync(path.join(dir, "bibtui"))) {
+				// Validate before creating any block/session — a wrong dir used to
+				// spawn a doomed block ("bash: ./bibtui: Is a directory", exit 126).
+				if (!appDir) {
 					return {
 						content: [
 							{
 								type: "text",
-								text: `No bibtui binary at ${path.join(dir, "bibtui")}. ` +
-									`Pass dir=<repo root containing the bibtui binary and bibles/> — ` +
-									`e.g. dir=/home/danh/src/bibtui — and retry. ` +
+								text: `No executable bibtui in ${requestedDir} (nor ${path.join(requestedDir, "bibtui")}). ` +
+									`Pass dir=<repo root containing the bibtui binary and bibles/>, e.g. dir=/tmp/bibtui. ` +
 									`Nothing was launched.`,
 							},
 						],
-						details: { stream, launched: false, dir },
+						details: { stream, launched: false, dir: requestedDir },
 					};
 				}
 				const mux = detectMultiplexer();
@@ -435,7 +471,7 @@ export default function proxenosBibtuiExtension(pi: ExtensionAPI) {
 					// Not inside an omp-recognized multiplexer: tern (omp lacks an
 					// adapter, #15366) or a plain terminal. Try the tern CLI directly;
 					// it no-ops fast if tern isn't installed, and we fall on.
-					ternBlockId = await spawnInTern(args, dir);
+					ternBlockId = await spawnInTern(args, dir, params.block);
 					if (ternBlockId !== null) launchedVia = "tern block";
 				}
 				if (!launchedVia) {
