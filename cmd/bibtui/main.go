@@ -81,14 +81,9 @@ type model struct {
 	noteDeleteConfirm bool // y/n prompt for deletion
 
 	proxStream string // non-empty = AI integration enabled, else feature is entirely inert
-	askOpen    bool
-	askInput   string
 
 	proxStreamPath      string // resolved absolute path to the stream file (honors proxenos config overrides)
-	pendingQID          string // id of the user.message currently awaiting an answer
-	thinking            bool
-	lastAnswer          string
-	annotationPanelOpen bool // A toggles only this; activeGroups remain durable preferences
+	annotationPanelOpen bool   // A toggles only this; activeGroups remain durable preferences
 }
 
 // withMode switches the app mode and triggers a content rebuild when entering
@@ -398,60 +393,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		if m.askOpen {
-			switch msg.Type {
-			case tea.KeyEsc:
-				m.askOpen = false
-				m.askInput = ""
-			case tea.KeyEnter:
-				text := strings.TrimSpace(m.askInput)
-				m.askOpen = false
-				m.askInput = ""
-				if text == "" {
-					return m, nil
-				}
-				ref := m.activeRef()
-				qid, err := sendProxEventGetID(m.proxStream, "user.message", map[string]any{
-					"text":    text,
-					"book":    ref.Book,
-					"chapter": ref.Chapter,
-					"verse":   ref.Verse,
-					"ref":     ref.String(),
-				})
-				if err != nil {
-					proxLogf("send user.message failed: %v", err)
-					return m, nil
-				}
-				m.pendingQID = qid
-				m.thinking = true
-				m.lastAnswer = ""
-				return m, proxAnswerTimeout(qid)
-			case tea.KeyBackspace:
-				if len(m.askInput) > 0 {
-					runes := []rune(m.askInput)
-					m.askInput = string(runes[:len(runes)-1])
-				}
-			case tea.KeyRunes:
-				m.askInput += string(msg.Runes)
-			}
-			return m, nil
-		}
-
-		if m.thinking || m.lastAnswer != "" {
-			m.thinking = false
-			m.lastAnswer = ""
-			m.pendingQID = ""
-			// '?' during a pending answer means "ask something else" — reopen
-			// a fresh ask instead of swallowing the key (a bare dismiss made
-			// every following keystroke leak into the reader: the 'o' in
-			// "probe" opened the translations picker, 'q' would quit).
-			if msg.String() == "?" {
-				m.askOpen = true
-				m.askInput = ""
-			}
-			return m, nil
-		}
-
 		if m.noteUI == noteUIInner {
 			return m.updateInnerNote(msg)
 		}
@@ -581,11 +522,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "A":
 			m = m.withPanelToggled()
-		case "?":
-			if m.proxStream != "" {
-				m.askOpen = true
-				m.askInput = ""
-			}
 		}
 
 	case proxNavGotoMsg:
@@ -643,18 +579,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return newModel, nil
 
 	case proxAnswerMsg:
-		if msg.ReplyTo == "" || msg.ReplyTo != m.pendingQID {
-			return m, nil
-		}
-		m.thinking = false
-		m.lastAnswer = msg.Text
-		return m, nil
-
-	case proxAnswerTimeoutMsg:
-		if m.thinking && m.pendingQID == msg.QID {
-			m.thinking = false
-			m.lastAnswer = "agent not responding — check `proxenos ls`"
-		}
+		// No ask overlay: agents answer in the harness chat. Retained only so
+		// a stream carrying old answer events decodes cleanly instead of
+		// rejecting; nothing renders.
 		return m, nil
 	}
 	return m, nil
@@ -1204,14 +1131,6 @@ func (m model) View() string {
 		return m.viewWithGoto()
 	}
 
-	if m.askOpen {
-		return m.viewWithAsk()
-	}
-
-	if m.thinking || m.lastAnswer != "" {
-		return m.viewWithAnswer()
-	}
-
 	if m.pickerOpen {
 		return m.statusBar() + "\n" + m.pickerContent() + "\n" + m.helpBar()
 	}
@@ -1228,46 +1147,6 @@ func (m model) View() string {
 		content += strings.Repeat("\n", vpH-len(rows))
 	}
 	return m.statusBar() + "\n" + content + "\n" + m.helpBar()
-}
-
-// viewWithAsk renders the normal content but reserves the bottom line for
-// the "ask the agent" input — the send-half of the user.message flow.
-func (m model) viewWithAsk() string {
-	vpH := m.vpH() - 1
-	if vpH < 1 {
-		vpH = 1
-	}
-	end := clamp(m.scroll+vpH, 0, len(m.lines))
-	rows := m.lines[m.scroll:end]
-	content := strings.Join(rows, "\n")
-	if len(rows) < vpH {
-		content += strings.Repeat("\n", vpH-len(rows))
-	}
-	askBar := helpSt.Render(padToWidth(
-		"  "+pickerCursorSt.Render("?")+" "+m.askInput+"█"+"    enter ask  ·  esc cancel", m.width))
-	return m.statusBar() + "\n" + content + "\n" + askBar
-}
-
-// viewWithAnswer renders the normal content but reserves the bottom line
-// for the agent's reply (or a "thinking…" placeholder) — the receive
-// half of the user.message flow. Dismissed by any keypress.
-func (m model) viewWithAnswer() string {
-	vpH := m.vpH() - 1
-	if vpH < 1 {
-		vpH = 1
-	}
-	end := clamp(m.scroll+vpH, 0, len(m.lines))
-	rows := m.lines[m.scroll:end]
-	content := strings.Join(rows, "\n")
-	if len(rows) < vpH {
-		content += strings.Repeat("\n", vpH-len(rows))
-	}
-	text := m.lastAnswer
-	if m.thinking {
-		text = "thinking…"
-	}
-	bar := helpSt.Render(padToWidth("  "+text+"    press any key to dismiss", m.width))
-	return m.statusBar() + "\n" + content + "\n" + bar
 }
 
 func (m model) pickerContent() string {
@@ -1330,7 +1209,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "warning: could not load divergence data: %v\n", err)
 	}
 
-	proxStream, proxAgent, startTrans := parseArgs(os.Args[1:])
+	proxStream, startTrans := parseArgs(os.Args[1:])
 	if len(startTrans) == 0 {
 		startTrans = []string{"kjv"}
 		found := false
@@ -1376,10 +1255,6 @@ func main() {
 			m.proxStreamPath = path
 		}
 	}
-	var attach *proxAttach
-	if m.proxStream != "" && proxAgent != "" {
-		attach = attachAppOwned(proxStream, proxAgent)
-	}
 	if m.proxStream != "" {
 		m.emit("app.started", map[string]any{"translations": startTrans, "resumed": session != nil})
 	}
@@ -1389,7 +1264,6 @@ func main() {
 		startProxPoll(m.proxStream, m.proxStreamPath, p.Send)
 	}
 	_, runErr := p.Run()
-	stopProxAttach(attach)
 	m.emitSync("app.exited", map[string]any{})
 	if runErr != nil {
 		fmt.Fprintln(os.Stderr, runErr)

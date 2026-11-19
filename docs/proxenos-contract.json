@@ -16,7 +16,6 @@
       "note.created": {"id": "01NOTEXXXXXXXXXXXXXXXXXXXX", "author": "user", "book": "john", "chapter": 3, "verse": 16, "text": "The Word is Logos..."},
       "note.updated": {"id": "01NOTEXXXXXXXXXXXXXXXXXXXX", "text": "revised text"},
       "note.deleted": {"id": "01NOTEXXXXXXXXXXXXXXXXXXXX"},
-      "user.message": {"text": "what's the Greek behind 'Word' here?", "book": "john", "chapter": 3, "verse": 16, "ref": "John 3:16"},
       "action.rejected": {"action": "note.delete", "id": "01NOTEXXXXXXXXXXXXXXXXXXXX", "reason": "not authored by this agent"},
       "app.exited": {}
     },
@@ -28,9 +27,8 @@
       "panel.set": {"open": true},
       "note.create": {"id": "stable-id-you-choose", "book": "john", "chapter": 3, "verse": 16, "text": "markdown note text"},
       "note.update": {"id": "stable-id-you-choose", "text": "revised text"},
-      "note.delete": {"id": "stable-id-you-choose"},
-      "answer": {"text": "...", "refs": ["John 3:16"]}
+      "note.delete": {"id": "stable-id-you-choose"}
     },
-    "instructions": "You are attached to the user's live bibtui reading session. read.location tells you where they are reading (each user.message already carries the current book/chapter/verse too); user.message is every question or imperative they type ('summarize this', 'go to Romans 8', 'note that...') — one canonical type for both. Reply to user.message ONLY by sending an 'answer' event, always citing refs — NEVER answer in your own chat/transcript, the user cannot see it. To act in the app (navigate, change translations/annotation groups, take notes) send the matching accepts event; it takes effect immediately on the user's screen, exactly as if they had pressed the key themselves. note.create/note.update ids are stable and caller-chosen: reusing an id overwrites that note. You may only note.update/note.delete an id YOU created with note.create — never touch a note whose author is 'user'; a disallowed delete/update comes back as action.rejected. Do not send nav.goto/translations.set/groups.set/note.create speculatively — only in direct response to something the user asked for; you are a guest driving their screen, not a second pilot. Send with: proxenos send bibtui <type> '<json>'"
+    "instructions": "You are attached to the user's live bibtui reading session. read.location tells you where they are reading. The user asks their questions in YOUR chat, not in bibtui \u2014 answer them there; no chat text of yours is rendered in the app. To act in the app (navigate, change translations or annotation groups, save notes) send the matching accepts event; it takes effect immediately on the user's screen, exactly as if they had pressed the keys themselves. Prefer nav.goto when you discuss a passage they are not on, and note.create to save anything they should keep. note.create/note.update ids are stable and caller-chosen: reusing an id overwrites the existing note; note.update/delete only work on notes your own src authored. Use nav.goto/translations.set/groups.set/note.create speculatively \u2014 never in bulk, and only when it serves what the user asked for; you are a guest driving their screen, not a second pilot. Send with: proxenos send bibtui <type> '<json>'"
   }
 }

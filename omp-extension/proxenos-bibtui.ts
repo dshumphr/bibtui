@@ -12,8 +12,9 @@
  *      --proxenos <stream> (bibtui bootstraps stream + contract idempotently).
  *   2. Extension polls the stream file (leading-\n NDJSON framing, EOF rule)
  *      and injects every non-agent user.message into the live session.
- *   3. Agent replies via `proxenos send <stream> answer … --as agent:omp
- *      --reply-to <id>`; bibtui's ask overlay renders it (reply_to matching).
+ *   3. The user asks questions in the harness chat; bibtui has no ask box.
+ *      Reading activity arrives as silent context, and the agent acts on the
+ *      app through its accepts verbs (nav.goto, note.create, …).
  *
  * bibtui stays harness-agnostic: this file is the only omp-specific glue.
  *
@@ -82,23 +83,26 @@ function detectMultiplexer(): "herdr" | "tmux" | "zellij" | "cmux" | "orca" | nu
 
 /**
  * Spawn argv in a new Tern tab and return the block id. Verified against
- * Stencil Tern: `tern new tab --json --cwd DIR --keep-open -- ARGV...` runs
- * the command in a new tab of the session the calling pane belongs to, and
- * every window showing that session (including a Mac window attached over
- * tern's remote service) displays it live. argv goes straight to execFile —
- * no shell, no quoting. Failures fall through to the detached-pty path.
+ * Stencil Tern: `tern split PANE right --cwd DIR --keep-open -- ARGV...` puts
+ * the command in a block beside the calling pane (a new tab when TERN_PANE is
+ * unknown), and every window showing that session — including a laptop window
+ * attached over tern's remote service — displays it live. argv goes straight
+ * to execFile: no shell, no quoting. Failures fall through to the detached-pty
+ * path.
  */
 async function spawnInTern(args: string[], cwd: string): Promise<string | null> {
 	try {
-		const { stdout } = await execFileP(
-			"tern",
-			["new", "tab", "--json", "--cwd", cwd, "--keep-open", "--", ...args],
-			{ timeout: 20_000 },
-		);
+		// Beside the conversation when we know the omp block (TERN_PANE),
+		// otherwise a new tab. Both print the new block id as JSON.
+		const pane = process.env.TERN_PANE;
+		const argv = pane
+			? ["split", "--json", pane, "right", "--cwd", cwd, "--keep-open", "--", ...args]
+			: ["new", "tab", "--json", "--cwd", cwd, "--keep-open", "--", ...args];
+		const { stdout } = await execFileP("tern", argv, { timeout: 20_000 });
 		const created = JSON.parse(stdout) as { block?: number | string };
 		return created?.block !== undefined ? String(created.block) : null;
 	} catch (err) {
-		console.error(`[proxenos-bibtui] tern new tab failed: ${String(err)}`);
+		console.error(`[proxenos-bibtui] tern spawn failed: ${String(err)}`);
 		return null;
 	}
 }
@@ -203,9 +207,8 @@ export default function proxenosBibtuiExtension(pi: ExtensionAPI) {
 			pi.logger.debug("px-bibtui: wake", { stream: w.stream, type: e.type, id: e.id });
 			pi.sendUserMessage(
 				`[bibtui${ref}] ${e.type}:${detail}\n` +
-					`(event ${e.id} on stream "${w.stream}" — if this expects a reply, send it via: ` +
-					`proxenos send ${w.stream} answer '{"text":"…","refs":[…]}' ` +
-					`--as agent:omp --reply-to ${e.id} — it renders in bibtui's ask overlay)`,
+					`(event ${e.id} on stream "${w.stream}" — context from the reading app; ` +
+					`the user asks questions in THIS chat, so answer here, not on the stream)`,
 			);
 			return;
 		}
@@ -326,14 +329,14 @@ export default function proxenosBibtuiExtension(pi: ExtensionAPI) {
 		label: "Open bibtui",
 		description:
 			"Launch the bibtui Bible reading app attached to a shared proxenos event stream, " +
-			"then watch the stream: the user's questions typed in bibtui (press ?) are injected " +
-			"into this session so you can answer them in-context. Prefer this over telling the " +
+			"then watch the stream so you know what the user is reading. bibtui has no chat box: " +
+			"the user asks their questions here, in this session. Prefer this over telling the " +
 			"user to run bibtui themselves when they want to read together. " +
 			"Use launch:'none' only if the user explicitly wants to run bibtui themselves — " +
 			"the watcher still works, the user just opens bibtui in their own split/pane " +
 			"with `./bibtui --proxenos <stream>`. " +
-			"COST MODEL: only user.message wakes a turn by default; every other event (navigation, " +
-			"notes, translation changes) arrives silently as hidden context on your next turn. " +
+			"COST MODEL: nothing wakes a turn by default — navigation, notes and translation " +
+			"changes arrive silently as hidden context on your next turn. " +
 			"If the user asks for something at a milestone ('quiz me when I finish a book'), " +
 			"call this again with milestones:true — it reconfigures in place without relaunching. " +
 			"Calling it again with default launch also guarantees the app is open: if the previous " +
@@ -433,7 +436,7 @@ export default function proxenosBibtuiExtension(pi: ExtensionAPI) {
 					// adapter, #15366) or a plain terminal. Try the tern CLI directly;
 					// it no-ops fast if tern isn't installed, and we fall on.
 					ternBlockId = await spawnInTern(args, dir);
-					if (ternBlockId !== null) launchedVia = "tern tab";
+					if (ternBlockId !== null) launchedVia = "tern block";
 				}
 				if (!launchedVia) {
 					// Last resort: the TUI gets its own pty via script(1) so bubbletea
@@ -493,12 +496,12 @@ export default function proxenosBibtuiExtension(pi: ExtensionAPI) {
 
 			const opening = launchedVia
 				? `bibtui is open (${launchedVia}) on stream "${stream}".` +
-					(launchedVia === "tern tab"
-						? ` The tern session lives in the daemon on this machine; it renders in the user's tern window whenever they attach (from the mac: tern ssh <this-host>).`
+					(launchedVia === "tern block"
+						? ` It is a split beside this conversation in the same tern tab, live in every window attached to this session.`
 						: "")
 				: `Watching stream "${stream}" — waiting for the user to open bibtui in their own pane (${args.join(" ")}).`;
 			const configLine =
-				`Wake rules: user.message${w.wake.size ? " + " + [...w.wake].join(", ") : ""}` +
+				`Wake rules: none${w.wake.size ? " + " + [...w.wake].join(", ") : ""}` +
 				(w.milestones ? " + book-finish milestones" : "") +
 				". Other events arrive as silent context on your next turn (no reply needed).";
 			return {
@@ -507,10 +510,9 @@ export default function proxenosBibtuiExtension(pi: ExtensionAPI) {
 						type: "text",
 						text:
 							opening + "\n" + configLine + "\n" +
-							"The user's questions typed in bibtui's ask overlay (?) will arrive here as `[bibtui]` messages — answer them in this session and also send the answer to the stream so bibtui renders it:\n" +
-							`  proxenos send ${stream} answer '{"text":"…","refs":["John 3:16"]}' --as agent:omp --reply-to <question-id>\n` +
-							"note.create also works (stable id → overwrite):\n" +
+							"Reading activity arrives here as `[bibtui]` context lines (no reply needed). The user asks questions in this chat; answer here. To act in the app, send its accepts verbs on the stream:\n" +
 							`  proxenos send ${stream} note.create '{"id":"…","book":"john","chapter":3,"verse":16,"text":"…"}' --as agent:omp\n` +
+							`  proxenos send ${stream} nav.goto '{"book":"john","chapter":3,"verse":16}' --as agent:omp\n` +
 							`Full vocabulary: proxenos tail ${stream} --tail 20 --pretty`,
 					},
 				],

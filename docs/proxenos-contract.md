@@ -52,7 +52,6 @@ Low-frequency, semantic — never per-scroll-line, per the cost model
 | `annotation.groups_changed` | `a` picker changes selected annotation groups | `{active}` | durable preferences; selection survives panel hide/show |
 | `annotation.panel_changed` | `A` hides or shows the annotation panel | `{open}` | visibility only; never changes selected groups |
 | `note.created` / `note.updated` / `note.deleted` | inner note UI save/delete, **by either author** | `{id, author, book, chapter, verse, text}` (update/delete omit ref) | user actions surfaced to the agent too — "almost any human action AI-visible" cuts both ways |
-| `user.message` | new `?` ask-prompt, Enter | `{text, book, chapter, verse, ref}` | canonical single type for questions *and* imperatives, current position always attached so the agent never has to cross-reference a separate `read.location` |
 | `action.rejected` | an inbound accepts-event bibtui couldn't/wouldn't apply | `{action, id?, reason}` | ack/nack loop — silent failure is worse than a loud one |
 | `app.exited` | quit (`q`/ctrl-c), best-effort | `{}` | |
 
@@ -84,7 +83,6 @@ any human action should be AI-accessible."
 | `note.create` | `{id, book, chapter, verse, text}` | inner note UI, `+ new note` → save | caller-chosen stable id; resend same id → overwrite (idempotent per proxenos convention) |
 | `note.update` | `{id, text}` | inner note UI, edit → save | only on notes this `src` authored |
 | `note.delete` | `{id}` | inner note UI, `d` → `y` | only on notes this `src` authored — see Safety below |
-| `answer` | `{text, refs}` | — | reply to a `user.message` (`reply_to` set); rendered in the ask overlay, not persisted as a note unless the agent also sends `note.create` |
 
 **Deliberately withheld — human-only, no accepts event:**
 
@@ -157,66 +155,72 @@ Self-filter: bibtui ignores any event whose `src == "app:bibtui"` when
 consuming inbound (its own emitted events echoing back), the same
 self-filter convention the bridge itself uses (plan §6.3).
 
-## Presence / "thinking"
+## Where questions live
 
-No new machinery — the documented convention (`app-integration.md`
-"Presence"): `?` sends `user.message` and opens an overlay showing
-"thinking…"; an `answer` with matching `reply_to` replaces it; no reply
-within ~2 minutes → "agent not responding — check `proxenos ls`," never a
-silent hang.
+Questions are asked in the harness chat (omp, Claude Code, …), never in
+bibtui. The harness already holds the conversation, the model and the
+transcript; a second input box in the app only forks the thread. bibtui's
+job is the *reading surface*: it emits where the user is reading
+(`read.location`) and accepts the verbs that move the app (`nav.goto`,
+`translations.set`, `note.create`, …). An agent wired to the stream (see
+`omp-extension/proxenos-bibtui.ts`) reads the former as context and acts
+through the latter.
 
-## Setup (operator runbook)
+## Setup (omp + Tern)
 
-Classic bridge-owned setup (bridge outlives the app; managed by you):
-
-```sh
-proxenos new bibtui --contract docs/proxenos-contract.json   # once, idempotent (bibtui checks existence first)
-proxenos attach bibtui --as main --agent claude --types user.message   # separate terminal / systemd unit
-./bibtui kjv web                                               # the app itself
-```
-
-**App-owned attach (recommended):** bibtui starts and reaps its own bridge,
-so a session is just the app with two flags — no second terminal, no unit
-file:
+Deploy the extension once; then a session is one sentence:
 
 ```sh
-./bibtui --proxenos bibtui --agent claude kjv web
+cp omp-extension/proxenos-bibtui.ts ~/.omp/agent/extensions/
 ```
 
-`--agent` names a proxenos adapter (`claude`, `omp`, `codex`, `test` — the
-last is the zero-cost scripted harness). The bridge runs as a bibtui child
-with its own process group (your Ctrl-C in the TUI doesn't kill it), logs
-to `proxenos-attach.log`, uses attachment name `bibtui-<agent>` (visible in
-`proxenos ls`), and dies with the app. Only `user.message` wakes the
-harness — the same cost default the manual runbook recommends. When the app
-exits, the session is gone; resume next launch (proxenos reuses the harness
-session id from attachment state). A user who wants the bridge to outlive
-the app (agent answering while the reader is closed) still uses the manual
-setup above.
+In any omp session (a Tern pane, so the extension can place blocks):
 
-`--types user.message` is the recommended default: only real questions
-wake (and pay for) a harness turn. `read.location` and `note.*` still land
-on the stream for audit and for `--replay` context on
-first attach — the agent sees recent navigation history the moment it
-*does* wake, it just doesn't wake *for* navigation. A user who wants the
-agent proactively commenting on navigation (e.g. flagging translation
-divergence as they read) widens `--types` explicitly; that's an opt-in
-cost, not a default one.
+> open bibtui and let's read John 3 together
+
+The agent calls `bibtui_open`, which runs
+
+```sh
+tern split $TERN_PANE right --cwd <repo-with-bibtui> --keep-open -- ./bibtui --proxenos bibtui-omp kjv
+```
+
+— a block beside the conversation. Every window attached to that Tern
+session shows it live, including a laptop window attached over Tern's
+remote service; the app itself runs where the agent runs. The extension
+then tails the stream and hands the agent reading activity as silent
+context (no turns spent on navigation), with `wakeTypes` and `milestones`
+opting into turns when the user asks for them.
+
+Without the extension (any harness, no Tern): run bibtui yourself and let
+proxenos' bridge feed a harness session —
+
+```sh
+proxenos new bibtui --contract docs/proxenos-contract.json   # once, idempotent
+./bibtui --proxenos bibtui kjv web
+proxenos attach bibtui --as main --agent claude --types read.location   # separate terminal
+```
+
+Scope `--types` to events that deserve a paid turn; with questions living
+in the chat there is nothing cheap to wake on by default.
 
 ## Walkthrough
 
-1. User reads John 3, navigates to it via `:goto` → emits `read.location`.
-2. User presses `?`, types "what's the Greek behind Word here?" → emits
-   `user.message{text, ref:"John 3:16"}`, overlay shows "thinking…".
-3. Agent wakes (attached with `--types user.message`), sees the question —
-   which already carries `ref:"John 3:16"` — sends
-   `answer{text:"...Logos...", refs:["John 3:16"]}` and, unprompted-but-
-   invited by the question,
+1. User: *"open bibtui and let's read John 3 together."* The agent calls
+   `bibtui_open`; a block appears beside the conversation on their screen.
+2. User navigates to John 3 → `read.location{book:"john", chapter:3}` lands
+   on the stream as silent context (no turn).
+3. User types in the harness chat: *"what's the Greek behind Word here?"* —
+   the agent already has their position from the digest, answers in chat
+   and, invited by the question, saves it into the app:
    `note.create{id:"jn-3-16-logos", book:"john", chapter:3, verse:16, text:"..."}`.
-4. bibtui's poll goroutine picks both up, clears "thinking…", renders the
-   answer, and the note shows up in the annotation column marked
-   `agent:claude`.
-5. User disagrees, presses `n` → `d` on that same verse's agent note → `y`.
-   Since `Author == "agent:claude" != "user"`, this is the user's own
-   client-side delete on their own store — always allowed, no
-   authorship check (the check only gates *inbound* stream commands).
+4. bibtui's poll goroutine applies it; the note appears in the annotation
+   column marked `agent:omp`. The app was not interrupted and nothing was
+   typed into it.
+5. User disagrees and deletes that note with `n` → `d` → `y` — a client-side
+   action on their own store. Authorship checks gate only *inbound* stream
+   commands: `note.update`/`note.delete` from a `src` that didn't author the
+   note are rejected with `action.rejected`.
+
+Groups (`a`) and panel visibility (`A`) work the user's way: `groups.set`
+merges the selected-group preferences, `panel.set` is visibility alone —
+exactly the split the human keys have.

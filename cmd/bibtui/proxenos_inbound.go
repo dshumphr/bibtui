@@ -366,8 +366,6 @@ type proxAnswerMsg struct {
 	ReplyTo string
 }
 
-type proxAnswerTimeoutMsg struct{ QID string }
-
 // ── decode: wire body → message, or a rejection reason ──────────────────
 
 func decodeProxAction(r proxEvent) (tea.Msg, string) {
@@ -629,12 +627,3 @@ func proxNoteErrorReason(err error) string {
 	}
 }
 
-// proxAnswerTimeout returns a tea.Cmd that fires a proxAnswerTimeoutMsg
-// after the presence-timeout window if nothing has answered by then
-// (app-integration.md "Presence" — a timeout must be a loud, honest
-// message, never a silent hang).
-func proxAnswerTimeout(qid string) tea.Cmd {
-	return tea.Tick(2*time.Minute, func(time.Time) tea.Msg {
-		return proxAnswerTimeoutMsg{QID: qid}
-	})
-}
