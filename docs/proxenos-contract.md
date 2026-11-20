@@ -191,17 +191,17 @@ then tails the stream and hands the agent reading activity as silent
 context (no turns spent on navigation), with `wakeTypes` and `milestones`
 opting into turns when the user asks for them.
 
-Without the extension (any harness, no Tern): run bibtui yourself and let
-proxenos' bridge feed a harness session —
+Without the extension, bibtui still emits and accepts on a stream anyone
+can read:
 
 ```sh
 proxenos new bibtui --contract docs/proxenos-contract.json   # once, idempotent
 ./bibtui --proxenos bibtui kjv web
-proxenos attach bibtui --as main --agent claude --types read.location   # separate terminal
+proxenos tail bibtui -f                                       # watch it, or point any tool at the file
 ```
 
-Scope `--types` to events that deserve a paid turn; with questions living
-in the chat there is nothing cheap to wake on by default.
+Nothing wakes an agent by itself — with questions living in the chat there
+is no cheap event to wake on. A harness integration is what adds that.
 
 ## Walkthrough
 

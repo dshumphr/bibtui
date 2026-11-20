@@ -42,8 +42,7 @@ func parseArgs(args []string) (proxStream string, rest []string) {
 }
 
 // ensureStreamSeeded verifies the stream exists (creating it with bibtui's
-// embedded contract if absent). Works identically for local and relay refs —
-// the CLI owns that distinction.
+// embedded contract if absent).
 func ensureStreamSeeded(stream string) error {
 	if exec.Command("proxenos", "tail", stream, "--tail", "1").Run() == nil {
 		return nil
@@ -69,12 +68,6 @@ func ensureStreamSeeded(stream string) error {
 // Any failure disables the feature for this run rather than blocking the
 // user from reading — middleware trouble is never a reason to not read a
 // Bible.
-//
-// A stream name containing ':' (proxenos <relay>:<stream> syntax) is a
-// RELAY stream: it lives on a remote relay's data dir, so there is no
-// local file to poll — inbound goes through `proxenos tail -f` (path is
-// returned empty and the poller picks the relay source). The CLI handles
-// new/tail/send against the configured binding identically.
 func bootstrapProxenos(stream string) (path string, ok bool) {
 	if stream == "" {
 		return "", false
@@ -86,9 +79,6 @@ func bootstrapProxenos(stream string) (path string, ok bool) {
 	if err := ensureStreamSeeded(stream); err != nil {
 		proxLogf("%v", err)
 		return "", false
-	}
-	if strings.Contains(stream, ":") {
-		return "", true // relay mode: no local path, poller tails via CLI
 	}
 	path, err := resolveStreamPath(stream)
 	if err != nil {

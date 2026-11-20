@@ -10,6 +10,27 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+const bibtuiUsage = `bibtui — terminal Bible study companion
+
+usage: bibtui [--proxenos <stream>] [translation...]
+
+  --proxenos <stream>   share this session with an agent harness over a
+                        proxenos event stream (see docs/proxenos-contract.md)
+  -h, --help            show this help
+
+translations: directories under bibles/ (default: kjv)
+keys: j/k scroll, ]/[ next/prev chapter, n note, a group, q quit
+`
+
+func helpRequested(args []string) bool {
+	for _, a := range args {
+		if a == "-h" || a == "--help" {
+			return true
+		}
+	}
+	return false
+}
+
 // ── translation detection ─────────────────────────────────────────────────
 
 func detectTranslations() []string {
@@ -1209,6 +1230,10 @@ func main() {
 		fmt.Fprintf(os.Stderr, "warning: could not load divergence data: %v\n", err)
 	}
 
+	if helpRequested(os.Args[1:]) {
+		fmt.Print(bibtuiUsage)
+		os.Exit(0)
+	}
 	proxStream, startTrans := parseArgs(os.Args[1:])
 	if len(startTrans) == 0 {
 		startTrans = []string{"kjv"}

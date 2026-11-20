@@ -11,7 +11,8 @@
  *   1. Agent calls the bibtui_open tool → extension launches bibtui with
  *      --proxenos <stream> (bibtui bootstraps stream + contract idempotently).
  *   2. Extension polls the stream file (leading-\n NDJSON framing, EOF rule)
- *      and injects every non-agent user.message into the live session.
+ *      and delivers reading activity into the live session: silent context by
+ *      default, a model turn only for event types the user configured.
  *   3. The user asks questions in the harness chat; bibtui has no ask box.
  *      Reading activity arrives as silent context, and the agent acts on the
  *      app through its accepts verbs (nav.goto, note.create, …).
@@ -234,8 +235,9 @@ export default function proxenosBibtuiExtension(pi: ExtensionAPI) {
 		// The agent's own sends echo onto the stream; never react to those.
 		if (e.src.startsWith("agent:")) return;
 
-		// Wake tier: user questions always wake; configured types wake per-event.
-		if (e.type === "user.message" || w.wake.has(e.type)) {
+		// Wake tier: only the event types the user configured spend a turn;
+		// everything else is silent context (queueDigest below).
+		if (w.wake.has(e.type)) {
 			const body = e.body as { text?: string; ref?: string };
 			const ref = body?.ref ? ` (at ${body.ref})` : "";
 			const detail = body?.text ? ` ${body.text}` : "";
@@ -386,7 +388,7 @@ export default function proxenosBibtuiExtension(pi: ExtensionAPI) {
 			translations: z.string().optional().describe("Space-separated translation codes, e.g. 'kjv web' (default: kjv)"),
 			launch: z.enum(["auto", "none"]).optional().describe("'auto' (default) spawns bibtui in a detected multiplexer pane; 'none' only watches the stream — the user runs bibtui themselves"),
 			block: z.string().optional().describe("Tern block to split beside (the pane you are talking in). Get it from your shell: echo $TERN_PANE — pass that id so the app opens beside this conversation, not in whatever tab happens to be focused."),
-			wakeTypes: z.array(z.string()).optional().describe("Event types that start a model turn (default: only user.message). Keep minimal — every wake costs a turn. All other events arrive free as hidden context on the next turn."),
+			wakeTypes: z.array(z.string()).optional().describe("Event types that start a model turn (default: none). Keep minimal — every wake costs a turn. All other events arrive free as hidden context on the next turn."),
 			milestones: z.boolean().optional().describe("Also wake when the user finishes a book (read.location book transition). For promises like 'quiz me at the end of each book'."),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -418,7 +420,7 @@ export default function proxenosBibtuiExtension(pi: ExtensionAPI) {
 								type: "text",
 								text:
 									`Watcher for stream "${stream}" reconfigured: ` +
-									`wakeTypes=[${params.wakeTypes?.join(", ") ?? "user.message (default)"}], ` +
+									`wakeTypes=[${params.wakeTypes?.join(", ") ?? "none"}], ` +
 									`milestones=${params.milestones ?? "unchanged"}. ${state}. ` +
 									"No new app instance was launched.",
 							},
