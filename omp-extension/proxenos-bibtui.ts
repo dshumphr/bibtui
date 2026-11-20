@@ -535,7 +535,8 @@ export default function proxenosBibtuiExtension(pi: ExtensionAPI) {
 			const opening = launchedVia
 				? `bibtui is open (${launchedVia}) on stream "${stream}".` +
 					(launchedVia === "tern block"
-						? ` It is a split beside this conversation in the same tern tab, live in every window attached to this session.`
+						? ` It is a split beside this conversation in the same tern tab, live in every window attached to this session` +
+							(ternBlockId ? ` (block ${ternBlockId}; close it with \`tern close ${ternBlockId}\`).` : ".")
 						: "")
 				: `Watching stream "${stream}" — waiting for the user to open bibtui in their own pane (${args.join(" ")}).`;
 			const configLine =

@@ -30,9 +30,26 @@ proxenos stream, so it stays usable without any agent.
 
 ## Install
 
+Ask your agent (in omp):
+
+> Copy `omp-extension/proxenos-bibtui.ts` to `~/.omp/agent/extensions/`, then
+> tell me to start a new omp session (extensions load at startup — a brand-new
+> file is not picked up by `/reload-plugins`). In the new session, verify by
+> calling `bibtui_open` with `dir=<bibtui repo> stream=bibtui-smoke
+> launch=auto` — a block should appear beside the conversation, the result
+> names its id, and `proxenos tail bibtui-smoke --tail 3` should show
+> `stream.meta`/`stream.contract`/`app.started`. Then `tern close <id>` and
+> `proxenos rm bibtui-smoke`.
+
+Or by hand:
+
 ```sh
 cp proxenos-bibtui.ts ~/.omp/agent/extensions/
 ```
+
+Then start a new omp session. Extensions load at session start; a brand-new
+file is **not** picked up by `/reload-plugins` (verified against omp 18.8.9),
+so the copy takes effect on the next session.
 
 Requirements:
 - `proxenos` on `PATH` (the app's `--proxenos` integration shells out to it).
@@ -47,6 +64,12 @@ Requirements:
   `echo $TERN_PANE` inside the pane where omp is running. If omitted, the
   extension uses `$TERN_PANE` from its own environment and falls back to
   `@focused`.
+- Verify after install: `bibtui_open` with `launch=auto` and a throwaway stream
+  should open a block beside the conversation and answer "tern block … (block
+  <id>; close it with `tern close <id>`)".
+- `launch=none` only *watches* an already-running app — it does not create the
+  stream. The app bootstraps its stream on start, so there is nothing to see
+  until the app has run at least once.
 - `dir` must contain the `bibtui` binary. If you pass the repo's parent
   (`dir=/tmp` for `/tmp/bibtui`), the extension finds `bibtui/bibtui`.
 - The extension is deliberately *bibtui-specific*: it knows the app's binary
